@@ -1,8 +1,8 @@
 {
-  "additionalFiles": "",
+  "additionalFiles": "../..,../..",
   "compiler.optimization_flags": "",
   "customBuildProperties": "",
-  "fqbn": "arduino:avr:nano",
+  "fqbn": "arduino:avr:nano:cpu=atmega328old",
   "hardwareFolders": "/home/gabe/.arduino15/packages/arduino/hardware/avr/1.8.8,/home/gabe/.arduino15/packages/arduino/hardware/avr/1.8.8",
   "otherLibrariesFolders": "/home/gabe/Arduino/libraries",
   "sketchLocation": "/home/gabe/dev/engg2000_project"
