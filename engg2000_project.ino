@@ -5,14 +5,18 @@ const int irPin = A0;
 void setup() {
   Serial.begin(9600);
   pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(inPin1, OUTPUT);
+  pinMode(inPin2, OUTPUT);
   Serial.println("Nano initialized successfully.");
 }
 
 void loop() {
-  digitalWrite(LED_BUILTIN, HIGH);
-  delay(1000);
-  digitalWrite(LED_BUILTIN, LOW);
-  delay(1000);
+  testMotorSequence();
+  testIRSensor();
+  //digitalWrite(LED_BUILTIN, HIGH);
+  //delay(1000);
+  //digitalWrite(LED_BUILTIN, LOW);
+  //delay(1000);
 }
 
 void testMotorSequence() {
@@ -39,6 +43,7 @@ void testMotorSequence() {
 
 void testIRSensor() {
   int sensorValue = analogRead(irPin);
-  Serial.print("Ir value: " + sensorValue);
+  Serial.print("Ir value: ");
+  Serial.println(sensorValue);
   delay(100);
 }
