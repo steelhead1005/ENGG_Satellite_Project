@@ -14,3 +14,25 @@ void loop() {
   digitalWrite(LED_BUILTIN, LOW);
   delay(1000);
 }
+
+void testMotorSequence() {
+  // Forward at 50% speed
+  analogWrite(inPin1, 127);
+  analogWrite(inPin2, 0);
+  delay(2000);
+
+  // Coast
+  analogWrite(inPin1, 0);
+  analogWrite(inPin2, 0);
+  delay(1000);
+
+  // Reverse at 50% speed
+  analogWrite(inPin1, 0);
+  analogWrite(inPin2, 127);
+  delay(2000);
+
+  // Brake
+  analogWrite(inPin1, 255);
+  analogWrite(inPin2, 255);
+  delay(1000);
+}
