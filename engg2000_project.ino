@@ -1,6 +1,7 @@
 const int inPin1 = 9;
 const int inPin2 = 10;
-const int irPin = 2;
+const int irPin = A0;
+
 void setup() {
   Serial.begin(9600);
   pinMode(LED_BUILTIN, OUTPUT);
@@ -34,4 +35,10 @@ void testMotorSequence() {
   analogWrite(inPin1, 255);
   analogWrite(inPin2, 255);
   delay(1000);
+}
+
+void testIRSensor() {
+  int sensorValue = analogRead(irPin);
+  Serial.print("Ir value: " + sensorValue);
+  delay(100);
 }
