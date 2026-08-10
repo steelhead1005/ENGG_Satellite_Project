@@ -1,10 +1,11 @@
+const int inPin1 = 9;
+const int inPin2 = 10;
+const int irPin = 2;
 void setup() {
   Serial.begin(9600);
   pinMode(LED_BUILTIN, OUTPUT);
   Serial.println("Nano initialized successfully.");
-  const int inPin1 = 9;
-  const int inPin2 = 10;
-  const int irPin = 2;
+  
 
 }
 
