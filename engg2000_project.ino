@@ -5,8 +5,6 @@ void setup() {
   Serial.begin(9600);
   pinMode(LED_BUILTIN, OUTPUT);
   Serial.println("Nano initialized successfully.");
-  
-
 }
 
 void loop() {
@@ -22,7 +20,7 @@ void testMotorSequence() {
   analogWrite(inPin2, 0);
   delay(2000);
 
-  // Coast
+  // Lift and Coast
   analogWrite(inPin1, 0);
   analogWrite(inPin2, 0);
   delay(1000);
