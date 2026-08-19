@@ -1,7 +1,6 @@
 import serial
 import csv
 import time
-import struct
 
 # Configure the serial port and baud rate to match your Arduino
 SERIAL_PORT = '/dev/ttyUSB0'
@@ -17,13 +16,11 @@ def main():
         print(f"Error: Could not open port {SERIAL_PORT}. Is it plugged in?")
         return
 
-    # 2. Open both the CSV file (text) and the Binary file (wb)
-    with open('sentinel_telemetry.csv', mode='w', newline='') as csv_file, \
-         open('sentinel_telemetry.bin', mode='wb') as bin_file:
-        
+    # 2. Open a new CSV file and set up the writer
+    with open('sentinel_telemetry.csv', mode='w', newline='') as csv_file:
         csv_writer = csv.writer(csv_file)
         
-        # Write the column headers for CSV
+        # Write the column headers
         csv_writer.writerow(['Timestamp', 'Emitter_State', 'IR_Status', 'Motor_State', 'Laser_State'])
         print("Logging started. Press Ctrl+C to stop.")
 
@@ -35,38 +32,30 @@ def main():
                     line = ser.readline().decode('utf-8').strip()
 
                     # 4. Parse the specific telemetry line from your Arduino code
+                    # Expected format: "Emitter: ON | IR: DETECTED | Motor: ON | Laser: ON"
                     if "Emitter:" in line and "|" in line:
                         try:
                             # Split the string by the pipe character
                             parts = [p.strip() for p in line.split('|')]
                             
-                            # Extract just the values
+                            # Extract just the values (e.g., separating "Emitter: ON" to just "ON")
                             emitter_val = parts[0].split(':')[1].strip()
                             ir_val = parts[1].split(':')[1].strip()
                             motor_val = parts[2].split(':')[1].strip()
                             laser_val = parts[3].split(':')[1].strip()
                             currentTime = (time.time() - INITIAL_TIME)
-                            
-                            # Write text to CSV
+                            # Write the parsed values to the CSV row
                             csv_writer.writerow([round(currentTime, 3), emitter_val, ir_val, motor_val, laser_val])
-                            
-                            # Map text states to integer binaries (1 or 0)
-                            emitter_bin = 1 if emitter_val == "ON" else 0
-                            ir_bin = 1 if ir_val == "DETECTED" else 0
-                            motor_bin = 1 if motor_val == "ON" else 0
-                            laser_bin = 1 if laser_val == "ON" else 0
-                            
-                            # Pack into binary format: Little-endian float, and 4 unsigned bytes
-                            binary_data = struct.pack('<fBBBB', currentTime, emitter_bin, ir_bin, motor_bin, laser_bin)
-                            bin_file.write(binary_data)
                             
                         except IndexError:
                             print(f"Malformed data skipped: {line}")
                     else:
+                        # Print the standard event triggers (e.g., "MOTOR ON", "LASER OFF") to the terminal
                         print(f"Event Triggered: {line}")
 
         except KeyboardInterrupt:
-            print("\nLogging terminated. Files saved as sentinel_telemetry.csv and sentinel_telemetry.bin.")
+            # Gracefully handle the user stopping the script
+            print("\nLogging terminated. File saved as sentinel_telemetry.csv.")
         finally:
             ser.close()
 
