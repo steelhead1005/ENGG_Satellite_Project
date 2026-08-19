@@ -25,7 +25,7 @@ void setup() {
 
   pinMode(laserPin, OUTPUT);
 
-  // Your current motor wiring
+  // current motor wiring
   // HIGH = counter-clockwise
   digitalWrite(motorDIR, HIGH);
 
@@ -65,7 +65,7 @@ void loop() {
   // READ IR RECEIVER
   // ---------------------------------
 
-  bool irDetected = (digitalRead(irReceiverPin) == LOW);
+  bool irDetected = checkTargetDetected();
 
   // ---------------------------------
   // IR DETECTED
@@ -77,13 +77,7 @@ void loop() {
     active = true;
 
     activeStartTime = currentTime;
-
-    // Motor ON
-    digitalWrite(motorDIR, HIGH);
-    analogWrite(motorPWM, MOTOR_SPEED);
-
-    // Laser ON
-    digitalWrite(laserPin, HIGH);
+    triggerActuation();
 
     Serial.println("IR DETECTED");
     Serial.println("MOTOR ON");
@@ -96,10 +90,7 @@ void loop() {
   // ---------------------------------
 
   if (active && currentTime - activeStartTime >= 1000) {
-    analogWrite(motorPWM, 0);
-
-    digitalWrite(laserPin, LOW);
-
+    stopActuation();
     active = false;
 
     Serial.println("MOTOR OFF");
@@ -135,4 +126,19 @@ void loop() {
 
     lastTelemetry = currentTime;
   }
+}
+
+bool checkTargetDetected() {
+  return (digitalRead(irReceiverPin) == LOW);
+}
+
+void triggerActuation() {
+  digitalWrite(motorDIR, HIGH);
+  analogWrite(motorPWM, MOTOR_SPEED);
+  digitalWrite(laserPin, HIGH);
+}
+
+void stopActuation() {
+  analogWrite(motorPWM, 0);
+  digitalWrite(laserPin, LOW);
 }
