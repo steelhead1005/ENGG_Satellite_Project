@@ -128,17 +128,18 @@ void loop() {
   }
 }
 
+// reads the IR receiver pin (always active, never switched off)
 bool checkTargetDetected() {
-  return (digitalRead(irReceiverPin) == LOW);
+  return (digitalRead(irReceiverPin) == LOW); // true if target is detected
 }
 
 void triggerActuation() {
-  digitalWrite(motorDIR, HIGH);
-  analogWrite(motorPWM, MOTOR_SPEED);
-  digitalWrite(laserPin, HIGH);
+  digitalWrite(motorDIR, HIGH);       // set spin direction
+  analogWrite(motorPWM, MOTOR_SPEED); // turn motor on
+  digitalWrite(laserPin, HIGH);       // turn laser on
 }
 
 void stopActuation() {
-  analogWrite(motorPWM, 0);
-  digitalWrite(laserPin, LOW);
+  analogWrite(motorPWM, 0);     // stop the motor
+  digitalWrite(laserPin, LOW);  // turn the laser off
 }
