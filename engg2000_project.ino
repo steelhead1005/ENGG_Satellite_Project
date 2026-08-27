@@ -44,7 +44,7 @@ void loop() {
   // IR EMITTER: 5 sec ON / 5 sec OFF
   // ---------------------------------
 
-  if (currentTime - lastEmitterChange >= 15000) {
+  if (currentTime - lastEmitterChange >= 5000) {
     lastEmitterChange = currentTime;
 
     emitterOn = !emitterOn;
