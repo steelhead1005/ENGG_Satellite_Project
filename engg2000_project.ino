@@ -1,6 +1,21 @@
 const int irEmitterPin = 5;
 const int irReceiverPin = 3;
 
+//------------------------------------------------------------------
+//   CURRENTLY NOT CONNECTED JUST FOR PROTOTYPE CODE
+//------------------------------------------------------------------
+// const int irRecieverPin1 = 1;
+// const int irRecieverPin2 = 2;
+// const int irRecieverPin3 = 4;
+// const int irRecieverPin4 = 6;
+// const int irRecieverPin5 = 7;
+// const int irRecieverPin6 = 10;
+// const int irRecieverPin7 = 11;
+//---------------------------------
+// Array to hold IR values
+//---------------------------------
+// const bool [8] irReadings;
+
 const int motorPWM = 9;
 const int motorDIR = 8;
 
@@ -118,6 +133,17 @@ void loop() {
     Serial.print(" | IR: ");
     Serial.print(irDetected ? "DETECTED" : "NONE");
 
+// -------------------------------------------------------
+// basic implementation of multi reciever telemetry
+// -------------------------------------------------------
+
+//    for (int i =0; i<=7;i++){
+        // Serial.print(strcar(" | IR");
+        //Serial.print(i, DEC);
+        // Serial.print(": ");
+//      Serial.print(irReadings[i] ? "DETECTED" : "NONE");
+//    }
+
     Serial.print(" | Motor: ");
     Serial.print(active ? "ON" : "OFF");
 
@@ -143,3 +169,13 @@ void stopActuation() {
   analogWrite(motorPWM, 0);     // stop the motor
   digitalWrite(laserPin, LOW);  // turn the laser off
 }
+
+// ---------------------------------------------------------------------------------------------------
+//   To be changed, edited or removed completley upon clearer hardware implementation
+// ---------------------------------------------------------------------------------------------------
+
+
+// void updateRecieverValues(){
+//   irReadingsdigitalRead={(irReceiverPin) == LOW, (irReceiverPin1) == LOW, (irReceiverPin2) == LOW, (irReceiverPin3) == LOW, (irReceiverPin4) == LOW, (irReceiverPin5) == LOW, (irReceiverPin6) == LOW, (irReceiverPin7) == LOW};
+// }
+
