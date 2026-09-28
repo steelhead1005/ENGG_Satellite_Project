@@ -43,6 +43,7 @@ void setup() {
 }
 
 void loop() {
+  unsigned long loopStartMicros = micros();
   unsigned long currentTime = millis();
 
   // ---------------------------------
@@ -123,30 +124,33 @@ void loop() {
     Serial.print(" | IR: ");
     Serial.print(irDetected ? "DETECTED" : "NONE");
 
-// -------------------------------------------------------
-// basic implementation of multi reciever telemetry
-// -------------------------------------------------------
+    Serial.print(" | Array: ");
+    for (int i = 0; i < 6; i++) {
+      Serial.print(irReadings[i] ? "1" : "0");
+    }
 
-//    for (int i =0; i<=7;i++){
-        // Serial.print(strcar(" | IR");
-        //Serial.print(i, DEC);
-        // Serial.print(": ");
-//      Serial.print(irReadings[i] ? "DETECTED" : "NONE");
-//    }
+    Serial.print(" | Angle: ");
+    Serial.print(getTargetAngle());
 
     Serial.print(" | Motor: ");
     Serial.print(active ? "ON" : "OFF");
 
     Serial.print(" | Laser: ");
-    Serial.println(active ? "ON" : "OFF");
+    Serial.print(digitalRead(laserPin) == HIGH ? "ON" : "OFF");
+
+    Serial.print(" | LoopUs: ");
+    Serial.println(micros() - loopStartMicros);
 
     lastTelemetry = currentTime;
   }
 }
 
-// reads the IR receiver pin (always active, never switched off)
 bool checkTargetDetected() {
-  return (digitalRead(irReceiverPin) == LOW); // true if target is detected
+  updateReceiverValues();
+  for (int i = 0; i < 6; i++) {
+    if (irReadings[i]) return true;
+  }
+  return false;
 }
 
 void triggerActuation() {
@@ -160,12 +164,26 @@ void stopActuation() {
   digitalWrite(laserPin, LOW);  // turn the laser off
 }
 
-// ---------------------------------------------------------------------------------------------------
-//   To be changed, edited or removed completley upon clearer hardware implementation
-// ---------------------------------------------------------------------------------------------------
+void updateReceiverValues() {
+  for (int i = 0; i < 6; i++) {
+    irReadings[i] = (digitalRead(irPins[i]) == LOW);
+  }
+}
 
+float getTargetAngle() {
+  float sumX = 0.0;
+  float sumY = 0.0;
+  int activeCount = 0;
 
-// void updateRecieverValues(){
-//   irReadingsdigitalRead={(irReceiverPin) == LOW, (irReceiverPin1) == LOW, (irReceiverPin2) == LOW, (irReceiverPin3) == LOW, (irReceiverPin4) == LOW, (irReceiverPin5) == LOW, (irReceiverPin6) == LOW, (irReceiverPin7) == LOW};
-// }
+  for (int i = 0; i < 6; i++) {
+    if (irReadings[i]) {
+      float rad = sensorAngles[i] * (PI / 180.0);
+      sumX += cos(rad);
+      sumY += sin(rad);
+      activeCount++;
+    }
+  }
 
+  if (activeCount == 0) return 0.0;
+  return atan2(sumY, sumX) * (180.0 / PI);
+}
