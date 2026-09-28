@@ -1,3 +1,7 @@
+#include <EEPROM.h>
+int eepromAddr = 0;
+bool isRecording = true; // Set false when dumping
+
 const int irEmitterPin = 5;
 
 const int irPins[6] = {2, 3, 4, 7, 10, 11}; 
@@ -40,6 +44,34 @@ void setup() {
   Serial.begin(9600);
 
   Serial.println("System started");
+  Serial.println("Send 'D' within 5 seconds to dump saved EEPROM run, or wait to start new recording...");
+  unsigned long waitStart = millis();
+  while (millis() - waitStart < 5000) {
+    if (Serial.available() > 0 && (Serial.read() == 'D' || Serial.read() == 'd')) {
+      isRecording = false;
+      for (int addr = 0; addr < 1024; addr += 4) {
+        byte packedState = EEPROM.read(addr);
+        if (packedState == 255) break; // End of recorded data
+
+        int8_t savedAngle = (int8_t)EEPROM.read(addr + 1);
+        uint16_t savedLoopUs = word(EEPROM.read(addr + 2), EEPROM.read(addr + 3));
+
+        bool emOn  = bitRead(packedState, 7);
+        bool motOn = bitRead(packedState, 6);
+        byte arr   = packedState & 0b00111111;
+
+        Serial.print("Emitter: "); Serial.print(emOn ? "ON" : "OFF");
+        Serial.print(" | IR: ");   Serial.print(arr > 0 ? "DETECTED" : "NONE");
+        Serial.print(" | Array: ");
+        for (int i = 0; i < 6; i++) Serial.print(bitRead(arr, i) ? "1" : "0");
+        Serial.print(" | Angle: "); Serial.print(savedAngle);
+        Serial.print(" | Motor: "); Serial.print(motOn ? "ON" : "OFF");
+        Serial.print(" | Laser: "); Serial.print(motOn ? "ON" : "OFF");
+        Serial.print(" | LoopUs: "); Serial.println(savedLoopUs);
+      }
+      while (true); // Stop here after dumping
+    }
+  }
 }
 
 void loop() {
@@ -118,6 +150,22 @@ void loop() {
   static unsigned long lastTelemetry = 0;
 
   if (currentTime - lastTelemetry >= 250) {
+    if (isRecording && eepromAddr <= 1020) {
+      byte packed = 0;
+      for (int i = 0; i < 6; i++) {
+        if (irReadings[i]) bitSet(packed, i);
+      }
+      if (active)    bitSet(packed, 6);
+      if (emitterOn) bitSet(packed, 7);
+
+      uint16_t loopUs = micros() - loopStartMicros;
+      EEPROM.update(eepromAddr,     packed);
+      EEPROM.update(eepromAddr + 1, (byte)((int8_t)getTargetAngle()));
+      EEPROM.update(eepromAddr + 2, highByte(loopUs));
+      EEPROM.update(eepromAddr + 3, lowByte(loopUs));
+      eepromAddr += 4;
+    }
+
     Serial.print("Emitter: ");
     Serial.print(emitterOn ? "ON" : "OFF");
 
