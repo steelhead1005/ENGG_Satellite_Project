@@ -1,6 +1,7 @@
 #include <EEPROM.h>
-int eepromAddr = 0;
-bool isRecording = true; // Set false when dumping
+
+// Set to false for Test Run 1 (V1 Baseline), then true for Test Run 2 (V2 Aiming)
+const bool USE_V2_AIMING = true;
 
 const int irEmitterPin = 5;
 
@@ -10,7 +11,6 @@ bool irReadings[6] = {false, false, false, false, false, false};
 
 const int motorPWM = 9;
 const int motorDIR = 8;
-
 const int laserPin = 6;
 
 const int MOTOR_SPEED = 120;
@@ -20,8 +20,9 @@ unsigned long lastEmitterChange = 0;
 
 bool triggered = false;
 bool active = false;
-
 unsigned long activeStartTime = 0;
+
+int eepromAddr = 0;
 
 void setup() {
   pinMode(irEmitterPin, OUTPUT);
@@ -31,47 +32,29 @@ void setup() {
 
   pinMode(motorPWM, OUTPUT);
   pinMode(motorDIR, OUTPUT);
-
   pinMode(laserPin, OUTPUT);
 
-  // current motor wiring
-  // HIGH = counter-clockwise
   digitalWrite(motorDIR, HIGH);
-
   analogWrite(motorPWM, 0);
   digitalWrite(laserPin, LOW);
 
   Serial.begin(9600);
 
-  Serial.println("System started");
-  Serial.println("Send 'D' within 5 seconds to dump saved EEPROM run, or wait to start new recording...");
+  // 5-second window on startup: if plugged into laptop and Python sends 'D', dump EEPROM
   unsigned long waitStart = millis();
   while (millis() - waitStart < 5000) {
-    if (Serial.available() > 0 && (Serial.read() == 'D' || Serial.read() == 'd')) {
-      isRecording = false;
-      for (int addr = 0; addr < 1024; addr += 4) {
-        byte packedState = EEPROM.read(addr);
-        if (packedState == 255) break; // End of recorded data
-
-        int8_t savedAngle = (int8_t)EEPROM.read(addr + 1);
-        uint16_t savedLoopUs = word(EEPROM.read(addr + 2), EEPROM.read(addr + 3));
-
-        bool emOn  = bitRead(packedState, 7);
-        bool motOn = bitRead(packedState, 6);
-        byte arr   = packedState & 0b00111111;
-
-        Serial.print("Emitter: "); Serial.print(emOn ? "ON" : "OFF");
-        Serial.print(" | IR: ");   Serial.print(arr > 0 ? "DETECTED" : "NONE");
-        Serial.print(" | Array: ");
-        for (int i = 0; i < 6; i++) Serial.print(bitRead(arr, i) ? "1" : "0");
-        Serial.print(" | Angle: "); Serial.print(savedAngle);
-        Serial.print(" | Motor: "); Serial.print(motOn ? "ON" : "OFF");
-        Serial.print(" | Laser: "); Serial.print(motOn ? "ON" : "OFF");
-        Serial.print(" | LoopUs: "); Serial.println(savedLoopUs);
+    if (Serial.available() > 0) {
+      char c = Serial.read();
+      if (c == 'D' || c == 'd') {
+        dumpEEPROM();
+        while (true); // Halt here after dumping so we don't overwrite data
       }
-      while (true); // Stop here after dumping
     }
   }
+
+  // No 'D' received -> We are on the hanging rig! Mark start of new recording
+  EEPROM.update(0, 255);
+  Serial.println("System started");
 }
 
 void loop() {
@@ -81,116 +64,139 @@ void loop() {
   // ---------------------------------
   // IR EMITTER: 5 sec ON / 5 sec OFF
   // ---------------------------------
-
   if (currentTime - lastEmitterChange >= 5000) {
     lastEmitterChange = currentTime;
-
     emitterOn = !emitterOn;
 
     if (emitterOn) {
       tone(irEmitterPin, 38000);
-      Serial.println("EMITTER ON");
-    } 
-    else {
+    } else {
       noTone(irEmitterPin);
       digitalWrite(irEmitterPin, LOW);
-
-      Serial.println("EMITTER OFF");
     }
   }
 
   // ---------------------------------
-  // READ IR RECEIVER
+  // READ IR RECEIVERS
   // ---------------------------------
-
   bool irDetected = checkTargetDetected();
 
   // ---------------------------------
-  // IR DETECTED
-  // MOTOR + LASER ON
+  // ACTUATION (V1 vs V2 Switch)
   // ---------------------------------
+  if (!USE_V2_AIMING) {
+    // V1 Baseline: blind 1-second motor + laser burst
+    if (irDetected && !triggered) {
+      triggered = true;
+      active = true;
+      activeStartTime = currentTime;
+      triggerActuation();
+    }
+    if (active && currentTime - activeStartTime >= 1000) {
+      stopActuation();
+      active = false;
+    }
+    if (!irDetected) {
+      triggered = false;
+    }
+  } else {
+    // V2 Aiming: spin toward targetAngle, brake and fire laser on Sensor 0 (0 deg)
+    float targetAngle = getTargetAngle();
+    bool frontAligned = irReadings[0];
 
-  if (irDetected && !triggered) {
-    triggered = true;
-    active = true;
+    if (irDetected && !frontAligned) {
+      active = true;
+      digitalWrite(motorDIR, (targetAngle > 0) ? HIGH : LOW);
+      analogWrite(motorPWM, MOTOR_SPEED);
+      digitalWrite(laserPin, LOW);
+    }
 
-    activeStartTime = currentTime;
-    triggerActuation();
+    if (frontAligned && !triggered) {
+      triggered = true;
+      active = false;
+      activeStartTime = currentTime;
 
-    Serial.println("IR DETECTED");
-    Serial.println("MOTOR ON");
-    Serial.println("LASER ON");
+      digitalWrite(motorDIR, (targetAngle > 0) ? LOW : HIGH);
+      analogWrite(motorPWM, 140);
+      delay(80);
+
+      analogWrite(motorPWM, 0);
+      digitalWrite(laserPin, HIGH);
+    }
+
+    if (triggered && currentTime - activeStartTime >= 2000) {
+      stopActuation();
+    }
+    if (!irDetected) {
+      triggered = false;
+      active = false;
+      stopActuation();
+    }
   }
 
   // ---------------------------------
-  // AFTER 1 SECOND
-  // MOTOR + LASER OFF
+  // TELEMETRY & EEPROM RECORDING (Every 250ms, up to 64 seconds)
   // ---------------------------------
-
-  if (active && currentTime - activeStartTime >= 1000) {
-    stopActuation();
-    active = false;
-
-    Serial.println("MOTOR OFF");
-    Serial.println("LASER OFF");
-  }
-
-  // ---------------------------------
-  // RE-ARM WHEN IR IS GONE
-  // ---------------------------------
-
-  if (!irDetected) {
-    triggered = false;
-  }
-
-  // ---------------------------------
-  // TELEMETRY
-  // ---------------------------------
-
   static unsigned long lastTelemetry = 0;
 
   if (currentTime - lastTelemetry >= 250) {
-    if (isRecording && eepromAddr <= 1020) {
-      byte packed = 0;
-      for (int i = 0; i < 6; i++) {
-        if (irReadings[i]) bitSet(packed, i);
-      }
-      if (active)    bitSet(packed, 6);
-      if (emitterOn) bitSet(packed, 7);
+    uint16_t loopUs = micros() - loopStartMicros;
+    bool laserOn = (digitalRead(laserPin) == HIGH);
 
-      uint16_t loopUs = micros() - loopStartMicros;
-      EEPROM.update(eepromAddr,     packed);
-      EEPROM.update(eepromAddr + 1, (byte)((int8_t)getTargetAngle()));
+    if (eepromAddr <= 1020) {
+      byte sensorByte = 0;
+      for (int i = 0; i < 6; i++) {
+        if (irReadings[i]) bitSet(sensorByte, i);
+      }
+
+      byte stateByte = 0;
+      if (emitterOn) bitSet(stateByte, 0);
+      if (active)    bitSet(stateByte, 1);
+      if (laserOn)   bitSet(stateByte, 2);
+
+      EEPROM.update(eepromAddr,     sensorByte);
+      EEPROM.update(eepromAddr + 1, stateByte);
       EEPROM.update(eepromAddr + 2, highByte(loopUs));
       EEPROM.update(eepromAddr + 3, lowByte(loopUs));
       eepromAddr += 4;
+
+      if (eepromAddr <= 1020) {
+        EEPROM.update(eepromAddr, 255); // End-of-log marker
+      }
     }
 
-    Serial.print("Emitter: ");
-    Serial.print(emitterOn ? "ON" : "OFF");
+    lastTelemetry = currentTime;
+  }
+}
 
-    Serial.print(" | IR: ");
-    Serial.print(irDetected ? "DETECTED" : "NONE");
+void dumpEEPROM() {
+  for (int addr = 0; addr <= 1020; addr += 4) {
+    byte sensorByte = EEPROM.read(addr);
+    if (sensorByte == 255) break; // Reached end of recorded run
 
+    byte stateByte = EEPROM.read(addr + 1);
+    uint16_t savedLoopUs = word(EEPROM.read(addr + 2), EEPROM.read(addr + 3));
+
+    for (int i = 0; i < 6; i++) {
+      irReadings[i] = bitRead(sensorByte, i);
+    }
+    bool emOn  = bitRead(stateByte, 0);
+    bool motOn = bitRead(stateByte, 1);
+    bool lasOn = bitRead(stateByte, 2);
+    bool irDet = (sensorByte > 0);
+
+    Serial.print("Emitter: "); Serial.print(emOn ? "ON" : "OFF");
+    Serial.print(" | IR: ");   Serial.print(irDet ? "DETECTED" : "NONE");
     Serial.print(" | Array: ");
     for (int i = 0; i < 6; i++) {
       Serial.print(irReadings[i] ? "1" : "0");
     }
-
-    Serial.print(" | Angle: ");
-    Serial.print(getTargetAngle());
-
-    Serial.print(" | Motor: ");
-    Serial.print(active ? "ON" : "OFF");
-
-    Serial.print(" | Laser: ");
-    Serial.print(digitalRead(laserPin) == HIGH ? "ON" : "OFF");
-
-    Serial.print(" | LoopUs: ");
-    Serial.println(micros() - loopStartMicros);
-
-    lastTelemetry = currentTime;
+    Serial.print(" | Angle: ");  Serial.print(getTargetAngle());
+    Serial.print(" | Motor: ");  Serial.print(motOn ? "ON" : "OFF");
+    Serial.print(" | Laser: ");  Serial.print(lasOn ? "ON" : "OFF");
+    Serial.print(" | LoopUs: "); Serial.println(savedLoopUs);
   }
+  Serial.println("DUMP_COMPLETE");
 }
 
 bool checkTargetDetected() {
@@ -202,14 +208,14 @@ bool checkTargetDetected() {
 }
 
 void triggerActuation() {
-  digitalWrite(motorDIR, HIGH);       // set spin direction
-  analogWrite(motorPWM, MOTOR_SPEED); // turn motor on
-  digitalWrite(laserPin, HIGH);       // turn laser on
+  digitalWrite(motorDIR, HIGH);
+  analogWrite(motorPWM, MOTOR_SPEED);
+  digitalWrite(laserPin, HIGH);
 }
 
 void stopActuation() {
-  analogWrite(motorPWM, 0);     // stop the motor
-  digitalWrite(laserPin, LOW);  // turn the laser off
+  analogWrite(motorPWM, 0);
+  digitalWrite(laserPin, LOW);
 }
 
 void updateReceiverValues() {
