@@ -1,20 +1,8 @@
 const int irEmitterPin = 5;
-const int irReceiverPin = 3;
 
-//------------------------------------------------------------------
-//   CURRENTLY NOT CONNECTED JUST FOR PROTOTYPE CODE
-//------------------------------------------------------------------
-// const int irRecieverPin1 = 1;
-// const int irRecieverPin2 = 2;
-// const int irRecieverPin3 = 4;
-// const int irRecieverPin4 = 6;
-// const int irRecieverPin5 = 7;
-// const int irRecieverPin6 = 10;
-// const int irRecieverPin7 = 11;
-//---------------------------------
-// Array to hold IR values
-//---------------------------------
-// const bool [8] irReadings;
+const int irPins[6] = {2, 3, 4, 7, 10, 11}; 
+const int sensorAngles[6] = {0, 60, 120, 180, -120, -60};
+bool irReadings[6] = {false, false, false, false, false, false};
 
 const int motorPWM = 9;
 const int motorDIR = 8;
@@ -33,7 +21,9 @@ unsigned long activeStartTime = 0;
 
 void setup() {
   pinMode(irEmitterPin, OUTPUT);
-  pinMode(irReceiverPin, INPUT_PULLUP);
+  for (int i = 0; i < 6; i++) {
+    pinMode(irPins[i], INPUT_PULLUP);
+  }
 
   pinMode(motorPWM, OUTPUT);
   pinMode(motorDIR, OUTPUT);
