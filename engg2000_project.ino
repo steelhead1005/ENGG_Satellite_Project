@@ -3,9 +3,8 @@
 // Set to false for Test Run 1 (V1 Baseline), then true for Test Run 2 (V2 Aiming)
 const bool USE_V2_AIMING = true;
 
-const int irEmitterPin = 7;
 
-const int irPins[6] = {3, 12, 4, 5, 10, 11}; 
+const int irPins[6] = {3, 5, 7, 10, 11, 12}; 
 const int sensorAngles[6] = {0, 60, 120, 180, -120, -60};
 bool irReadings[6] = {false, false, false, false, false, false};
 
