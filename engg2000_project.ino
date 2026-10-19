@@ -1,6 +1,16 @@
+// DC Gearmotor, FIT0186, 12 VDC, 251 rpm, incremental encoder
+
 // ---------------- MOTOR DRIVER (DRV8874) ----------------
+// Pololu DRV8874 Single brushed driver carrier
 const int PIN_DIR = 8;
 const int PIN_PWM = 9;
+
+// ---------------- MOTOR ENCODER (Hall A/B) ----------------
+const int PIN_ENC_A = 2;   // Hall sensor A, interrupt pin (INT0)
+const int PIN_ENC_B = 4;   // Hall sensor B, read in ISR for direction
+
+// Updated inside the ISR, so must be volatile.
+volatile long encoderCount = 0;
 
 // ---------------- LASER (Active HIGH) ----------------
 const int PIN_LASER = 6;
@@ -48,10 +58,32 @@ int lastError = 0;
 // Track current motor direction for electrical deadband
 int currentDir = -1;
 
+// On each rising edge of A, B's level tells us which way the wheel is turning.
+void encoderISR() {
+  if (digitalRead(PIN_ENC_B) == HIGH) {
+    encoderCount++;
+  } else {
+    encoderCount--;
+  }
+}
+
+// encoderCount is 4 bytes, so pause interrupts while copying it
+// to avoid reading a half-updated value.
+long getEncoderCount() {
+  noInterrupts();
+  long count = encoderCount;
+  interrupts();
+  return count;
+}
+
 void setup() {
   pinMode(PIN_DIR, OUTPUT);
   pinMode(PIN_PWM, OUTPUT);
   pinMode(PIN_LASER, OUTPUT);
+
+  pinMode(PIN_ENC_A, INPUT_PULLUP);
+  pinMode(PIN_ENC_B, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_ENC_A), encoderISR, RISING);
 
   for (int i = 0; i < NUM_SENSORS; i++) {
     pinMode(SENSOR_PINS[i], INPUT_PULLUP);

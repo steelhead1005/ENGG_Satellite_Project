@@ -1,4 +1,43 @@
 
+## Wiring
+
+### Arduino pin assignments
+
+| Pin | Connected to | Direction | Notes |
+|---|---|---|---|
+| D0 / D1 | USB serial | — | Reserved for telemetry and logging |
+| D2 | Motor encoder, Hall A | Input (`INPUT_PULLUP`) | Interrupt pin, triggers on rising edge |
+| D3 | IR receiver, +30° (front right) | Input (`INPUT_PULLUP`) | Active LOW |
+| D4 | Motor encoder, Hall B | Input (`INPUT_PULLUP`) | Read in the encoder interrupt to give direction |
+| D5 | IR receiver, −30° (front left) | Input (`INPUT_PULLUP`) | Active LOW |
+| D6 | Laser | Output | Active HIGH |
+| D7 | IR receiver, −150° (back left) | Input (`INPUT_PULLUP`) | Active LOW |
+| D8 | DRV8874 `PH/IN2` | Output | Direction (see driver mode below) |
+| D9 | DRV8874 `EN/IN1` | Output (PWM) | Motor speed |
+| D10 | IR receiver, +90° (right) | Input (`INPUT_PULLUP`) | Active LOW. Sensor is currently detached from the body |
+| D11 | IR receiver, −90° (left) | Input (`INPUT_PULLUP`) | Active LOW |
+| D12 | IR receiver, +150° (back right) | Input (`INPUT_PULLUP`) | Active LOW |
+| D13 | — | — | Spare |
+| A0–A5 | — | — | Spare |
+
+IR receiver angles are measured from the laser boresight (0°); positive is clockwise.
+
+### Motor driver (Pololu DRV8874 carrier)
+
+| Driver pin | Connected to | Effect |
+|---|---|---|
+| `EN/IN1` | Arduino D9 | PWM input |
+| `PH/IN2` | Arduino D8 | Direction input |
+| `PMODE` | 5 V | Selects PWM (IN1/IN2) mode |
+| `SLEEP` | GND (to be verified) | Low puts the driver to sleep and disables the outputs |
+| `nFAULT` | Not connected | — |
+| `IPROPI` | Not connected | — |
+| `OUT1` / `OUT2` | FIT0186 gearmotor (12 V, 251 rpm, encoder) | Reaction wheel drive |
+
+**Known issues:**
+- **`PMODE` is tied to 5 V, which selects PWM (IN1/IN2) mode, but the firmware drives the motor as if it were in PH/EN mode.** In PWM mode, DIR HIGH with low PWM duty runs the motor in reverse rather than stopping it. Tie `PMODE` to GND to match the firmware.
+- **`SLEEP` must be HIGH for the driver to run.** Measure its voltage with the board powered. If it reads 0 V, connect it to 5 V or to a spare pin driven HIGH in `setup()`.
+
 ## Targeting Process
 
 MQ Sentinel operates as a closed-loop pointing system. 
