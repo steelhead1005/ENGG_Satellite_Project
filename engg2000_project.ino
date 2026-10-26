@@ -88,7 +88,7 @@ void loop() {
       // HEURISTIC We just hit the edge of the overlap zone. 
       // Keep spinning in the current direction for a few milliseconds
       // to push closer to the true center before braking.
-      delay(40);
+      delay(80);
 
       // 1. Coast Deadband: Drop power to 0 to clear the electrical spike
       analogWrite(PIN_PWM, 0);
