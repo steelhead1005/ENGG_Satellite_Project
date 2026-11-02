@@ -1,9 +1,20 @@
+// -------------- Adafruit MPU6050 include ----------
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <Wire.h>
+
+Adafruit_MPU6050 mpu;
+
+
 // ---------------- MOTOR DRIVER (DRV8874) ----------------
 const int PIN_DIR = 8;
 const int PIN_PWM = 9;
 
 // ---------------- LASER (Active HIGH) ----------------
 const int PIN_LASER = 6;
+
+
+
 
 // ---------------- IR SENSOR PIN DEFINITIONS (Active LOW) ----------------
 // Angles are relative to laser (0 deg). Positive = clockwise/right.
@@ -59,6 +70,17 @@ void setup() {
 
   digitalWrite(PIN_LASER, LOW);
   digitalWrite(PIN_PWM, 0);
+  // Try to initialize!
+  if (!mpu.begin()) {
+    Serial.println("Failed to find MPU6050 chip");
+    while (1) {
+      delay(10);
+    }
+  }
+  Serial.println("MPU Detected");
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 }
 
 void loop() {
@@ -70,6 +92,11 @@ void loop() {
   // Find the triggered sensor closest to 0 degrees
   for (int i = 0; i < NUM_SENSORS; i++) {
     if (digitalRead(SENSOR_PINS[i]) == LOW) { 
+    	Serial.print("Array value:");
+    	Serial.print(i);
+	Serial.print("       PIN NUMBER:  ");
+	Serial.print(SENSOR_PINS[i]);
+	
       int absAngle = abs(SENSOR_ANGLES[i]);
       if (absAngle < bestAbs) {
         bestAbs = absAngle;
@@ -78,7 +105,7 @@ void loop() {
       }
     }
   }
-
+  
 // 2. OVERLAP TARGET LOCK
   bool frontRight = (digitalRead(PIN_IR_30R) == LOW);
   bool frontLeft  = (digitalRead(PIN_IR_30L) == LOW);
