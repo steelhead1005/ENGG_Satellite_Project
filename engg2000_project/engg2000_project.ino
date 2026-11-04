@@ -13,17 +13,16 @@ const int PIN_PWM = 9;
 // ---------------- LASER (Active HIGH) ----------------
 const int PIN_LASER = 6;
 
-
-
-
 // ---------------- IR SENSOR PIN DEFINITIONS (Active LOW) ----------------
+// The sensors are arranged in a circle to detect a constantly on IR emitter.
+// When both PIN_IR_30L and PIN_IR_30R are HIGH the laser will turn on for two seconds. 
 // Angles are relative to laser (0 deg). Positive = clockwise/right.
-const int PIN_IR_30R  = 3;   // +30  Front Right
-const int PIN_IR_90R  = 10;  // +90  Right  [CRITICAL: currently hanging off bot - DISABLED]
+const int PIN_IR_30R  = 3;   // +30  Front Right LASER TRIGGER TWO
+const int PIN_IR_90R  = 10;  // +90  Right
 const int PIN_IR_150R = 12;  // +150 Back Right
 const int PIN_IR_150L = 7;   // -150 Back Left
 const int PIN_IR_90L  = 11;  // -90  Left
-const int PIN_IR_30L  = 5;   // -30  Front Left
+const int PIN_IR_30L  = 5;   // -30  Front Left LASER TRIGGER TWO
 
 // ---------------- ACTIVE SENSOR ARRAYS ----------------
 const int SENSOR_PINS[] = {
@@ -118,7 +117,7 @@ void loop() {
       delay(80);
 
       // 1. Coast Deadband: Drop power to 0 to clear the electrical spike
-      analogWrite(PIN_PWM, 0);
+      analogWrite(PIN_PWM, 0); // Motor pauses here 
       delay(30); 
         
       // 2. Counter-torque brake: Instantly flip direction and pulse power
