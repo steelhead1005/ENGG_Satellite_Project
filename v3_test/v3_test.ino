@@ -87,6 +87,10 @@ const int IDX_30L = 1;
 const unsigned long IR_HOLD_MS = 40;    // a sensor "sees" for this long after its last LOW
 const unsigned long REARM_MS   = 500;   // all sensors dark this long = beacon switched off
 const unsigned long LOST_REARM_MS = 1500; // after firing: beacon seen but not locked this long = it moved, go again
+// true = after firing, ONLY re-arm once every sensor is dark for REARM_MS
+// (beacon switched off). Stops it re-firing at a beacon that is left on.
+// false = also re-arm on side/back sightings and LOST_REARM_MS.
+const bool REARM_ONLY_WHEN_DARK = true;
 
 // ---------------- SPLIT LOCK ----------------
 // With the shrouds moved inside, +30 and -30 may never see the beacon at the
@@ -139,6 +143,15 @@ const float HOLD_KD      = 2.0;       // PWM per deg/s (damping: eases off when 
 const int   HOLD_MIN_PWM = 150;       // smallest push (just under stiction; error adds on top)
 const int   HOLD_MAX_PWM = 220;
 const float HOLD_TOL     = 2.0;       // deg: inside this, motor off
+const float HOLD_U_START = 6.0;       // ignore pushes smaller than this (stops chatter from gyro noise)
+// After the 2 s laser: false = motor off and just wait for the beacon to go
+// dark (no long gyro hold that can drift and jitter). true = keep holding.
+const bool HOLD_AFTER_FIRE = false;
+
+// ---------------- AIM TRIM ----------------
+// If the laser always lands the SAME side of the beacon, trim it here.
+// + = aim further RIGHT, - = further LEFT (deg). Start with 2-3 deg steps.
+const float AIM_OFFSET_DEG = 0.0;
 
 // ---------------- WAIT UNTIL STILL (before firing) ----------------
 // Uses only HOW FAST it's turning (no direction), so it can't go wrong if the
@@ -316,8 +329,12 @@ bool correctStep() {
       return true;
     }
     float u = HOLD_KP * error - HOLD_KD * gyroZRate;   // + means push toward + angle
-    if (fabs(error) <= HOLD_TOL || fabs(u) < 1.0) {
-      stopMotor();              // close enough, or damping says let it coast in
+    // Only ever push TOWARD the target. If damping says "push the other way"
+    // (it's already swinging in fast), just brake (PWM 0) instead of
+    // reversing at HOLD_MIN_PWM: reversing there was the endless jitter.
+    bool pushAway = (u > 0) != (error > 0);
+    if (fabs(error) <= HOLD_TOL || pushAway || fabs(u) < HOLD_U_START) {
+      stopMotor();
       delay(2);
       return false;
     }
@@ -529,9 +546,14 @@ void loop() {
       if (notLockedSince == 0) notLockedSince = millis();
       if (millis() - notLockedSince >= LOST_REARM_MS) sideOrBack = true;
     }
+    if (REARM_ONLY_WHEN_DARK) sideOrBack = false;
     if (!anyRecent || sideOrBack) {
       targetHandled = false;
       notLockedSince = 0;
+      // Forget old front sightings so the split lock can't fire straight
+      // away at the spot where the old beacon was.
+      lastSeen[IDX_30R] = 0;
+      lastSeen[IDX_30L] = 0;
     }
   }
 
@@ -563,6 +585,7 @@ void loop() {
     } else {
       targetAngle = entryAngle;    // slid out of the zone: go back to where lock began
     }
+    targetAngle -= AIM_OFFSET_DEG; // + yaw is CCW (left), so right = minus
 
 
     relocateToTarget();            // fires whether or not this times out
@@ -576,7 +599,7 @@ void loop() {
   if (targetHandled) {
     digitalWrite(PIN_LASER, LOW);
     trackDir = -1;
-    if (gyroOk && USE_HEADING_CORRECTION && fabs(targetAngle - angleZ) > HOLD_DEADBAND) {
+    if (HOLD_AFTER_FIRE && gyroOk && USE_HEADING_CORRECTION && fabs(targetAngle - angleZ) > HOLD_DEADBAND) {
       correctStep();               // only fix big drift, otherwise leave it alone
     } else {
       stopMotor();
