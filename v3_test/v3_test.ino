@@ -48,6 +48,17 @@
 //  16. 90L and 150L merged into one left sensor at -120 (they always trigger
 //      together). Either pin LOW counts. See IR SENSORS.
 //
+//  17. No phantom shot after a beacon switches off. The lock was checked
+//      before the re-arm, and the split lock keeps front sightings 600 ms
+//      while re-arm waits 500 ms, so it fired at the empty spot. Re-arm now
+//      forgets those sightings and starts fresh on the next loop.
+//
+//  18. Active damping (ACTIVE_DAMPING). Motor off doesn't stop a reaction-wheel
+//      satellite, so the wait before firing now uses the wheel to stop the
+//      rotation and ease back onto the locked heading, and keeps it running
+//      through the 2 s laser instead of on/off heading nudges. Still now
+//      means under 2 deg/s. See ACTIVE DAMPING.
+//
 //   9. Split lock (2026-11-06, after first hang test): fires even when the
 //      two front sensors never see the beacon at the same time. See SPLIT LOCK.
 //
@@ -149,12 +160,28 @@ const int   HOLD_MAX_PWM = 220;
 const float HOLD_TOL     = 2.0;       // deg: inside this, motor off
 
 // ---------------- WAIT UNTIL STILL (before firing) ----------------
-// Uses only HOW FAST it's turning (no direction), so it can't go wrong if the
-// gyro sign is backwards. Fires once rotation stays below STILL_RATE for
-// STILL_MS, or after STILL_MAX_MS regardless.
-const float STILL_RATE = 5.0;                 // deg/s: below this counts as still
+// Fires once rotation stays below the still rate for STILL_MS, or after
+// STILL_MAX_MS regardless.
+const float STILL_RATE       = 2.0;           // deg/s: below this counts as still (ACTIVE_DAMPING)
+const float STILL_RATE_COAST = 5.0;           // same, for the old motor-off wait
 const unsigned long STILL_MS     = 400;       // must stay still this long
 const unsigned long STILL_MAX_MS = 3000;      // give up waiting and fire anyway
+
+// ---------------- ACTIVE DAMPING (wait + laser) ----------------
+// Motor off doesn't stop a reaction-wheel satellite: whatever spin the swivel
+// and wound string have added stays in the body when the wheel stops, and the
+// string keeps pushing. Instead, the same gyro speed control as tracking runs
+// in either direction, aiming for 0 deg/s plus a slow drift back onto the
+// locked heading: the wheel speeds up while the body still turns, then keeps
+// running at that speed through the whole 2 s laser. Still = on target too.
+// Direction comes from CORRECTION_INVERT: if the satellite speeds up during
+// the wait instead of stopping, flip that. Off when USE_HEADING_CORRECTION is.
+// false = old behaviour: motor off to wait, heading nudges while firing.
+const bool  ACTIVE_DAMPING  = true;
+const float DAMP_KI         = 0.05;   // PWM per (deg/s) per ms. Higher = stops sooner, too high = wobble
+const float DAMP_RETURN     = 2.0;    // deg/s back toward the locked heading per deg off (0 = just stop)
+const float DAMP_U_START    = 20.0;   // wheel stays off until the push builds past this (no chatter)
+const float DAMP_ABORT_RATE = 40.0;   // deg/s: faster than this = pushing the wrong way, give up
 
 // Heading correction (relocate + nudges while firing + hold after).
 // false = option 2: gyro only governs speed and waits for still; never steers
@@ -170,6 +197,9 @@ bool wasSpinning = false;
 float trackPwm = 0;
 int trackDir = -1;            // -1 = not driving
 int currentDir = LOW;
+float dampU = 0;              // active damping push, + = toward + angle
+unsigned long dampLast = 0;
+bool dampGaveUp = false;
 
 bool targetHandled = false;
 float targetAngle = 0;
@@ -394,25 +424,73 @@ bool relocateToTarget() {
 // LASER FIRE + HOLD
 // =====================================================
 
-// Option 4: motor off, wait for the twist/sway to die down before firing.
-void waitUntilStill() {
+// Active damping: start from a stopped wheel (relocate always ends stopped).
+void startDamping() {
   stopMotor();
+  dampU = 0;
+  dampLast = millis();
+  dampGaveUp = false;
+}
+
+// One step of the damping speed control. The push builds up while the body
+// turns faster than it should (DAMP_RETURN * error, so 0 deg/s once on the
+// heading) and stays where it is once it matches, so the wheel ends up
+// spinning just fast enough to cancel the drift. Same idea as the tracking
+// speed control, but signed so it can push either way.
+void dampStep() {
+  updateGyro();
+  updateIR();
+  unsigned long t = millis();
+  if (fabs(gyroZRate) > DAMP_ABORT_RATE) dampGaveUp = true;
+  if (dampGaveUp) {
+    stopMotor();                    // speeding up instead of stopping: back to motor off
+    delay(2);
+    return;
+  }
+  float error = targetAngle - angleZ;
+  dampU += DAMP_KI * (DAMP_RETURN * error - gyroZRate) * (t - dampLast);
+  dampLast = t;
+  float uMax = MAX_PWM - MIN_PWM + DAMP_U_START;
+  if (dampU > uMax) dampU = uMax;
+  if (dampU < -uMax) dampU = -uMax;
+  if (fabs(dampU) < DAMP_U_START) {
+    stopMotor();
+  } else {
+    bool direction = (dampU > 0) ? HIGH : LOW;   // same mapping as correctStep()
+    if (CORRECTION_INVERT) direction = !direction;
+    drive(direction, MIN_PWM + (int)(fabs(dampU) - DAMP_U_START));
+  }
+  delay(2);
+}
+
+// Wait for the twist/sway to die down before firing. With ACTIVE_DAMPING the
+// wheel stops the rotation, eases it back onto the locked heading and is left
+// running for the laser; otherwise the motor is off while it waits (option 4).
+void waitUntilStill() {
   if (!gyroOk) {
+    stopMotor();
     gyroDelay(500);                 // no gyro: just a fixed settle
     return;
   }
+  bool damping = ACTIVE_DAMPING && USE_HEADING_CORRECTION;
+  float stillRate = damping ? STILL_RATE : STILL_RATE_COAST;
+  if (damping) startDamping(); else stopMotor();
   unsigned long start = millis();
   unsigned long stillSince = 0;
   while (millis() - start < STILL_MAX_MS) {
-    updateGyro();
-    updateIR();
-    if (fabs(gyroZRate) < STILL_RATE) {
+    if (damping) {
+      dampStep();
+    } else {
+      updateGyro();
+      updateIR();
+      delay(2);
+    }
+    if (fabs(gyroZRate) < stillRate) {
       if (stillSince == 0) stillSince = millis();
       if (millis() - stillSince >= STILL_MS) return;
     } else {
       stillSince = 0;
     }
-    delay(2);
   }
 }
 
@@ -422,7 +500,8 @@ void fireLaserAndHold() {
   unsigned long fireStart = millis();
   while (millis() - fireStart < LASER_TIME) {
     if (gyroOk && USE_HEADING_CORRECTION) {
-      correctStep();
+      if (ACTIVE_DAMPING) dampStep();   // keep holding, carrying on from waitUntilStill()
+      else correctStep();
     } else {
       updateIR();
       delay(2);
@@ -543,6 +622,12 @@ void loop() {
     if (!anyRecent || sideOrBack) {
       targetHandled = false;
       notLockedSince = 0;
+      // Forget the old beacon's front sightings so the split lock can't fire
+      // straight away at the spot where it was, and start fresh next loop:
+      // `overlap` above was worked out before this re-arm.
+      lastSeen[IDX_30R] = 0;
+      lastSeen[IDX_30L] = 0;
+      return;
     }
   }
 
