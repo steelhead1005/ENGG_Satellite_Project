@@ -45,6 +45,9 @@
 //  15. Continuous hold (HOLD_*): steady push proportional to error instead of
 //      taps, so it actually stops on target and resists cord-twist drift.
 //
+//  16. 90L and 150L merged into one left sensor at -120 (they always trigger
+//      together). Either pin LOW counts. See IR SENSORS.
+//
 //   9. Split lock (2026-11-06, after first hang test): fires even when the
 //      two front sensors never see the beacon at the same time. See SPLIT LOCK.
 //
@@ -77,11 +80,16 @@ const int PIN_IR_150L = 7;
 const int PIN_IR_90L  = 11;
 const int PIN_IR_30L  = 5;
 
-const int SENSOR_PINS[]   = { PIN_IR_30R, PIN_IR_30L, PIN_IR_150R, PIN_IR_150L, PIN_IR_90L, PIN_IR_90R };
-const int SENSOR_ANGLES[] = { 30,         -30,        150,         -150,        -90,        90         };
-const int NUM_SENSORS = 6;
+// 90L and 150L always trigger together (reflection or wiring), so they are one
+// logical LEFT sensor at -120: PIN_IR_90L is OR'd into the 150L slot in
+// updateIR(). At -120 it also ranks behind 90R, so a stray left reading can't
+// win a tie and turn it away from a beacon on the right.
+const int SENSOR_PINS[]   = { PIN_IR_30R, PIN_IR_30L, PIN_IR_150R, PIN_IR_150L, PIN_IR_90R };
+const int SENSOR_ANGLES[] = { 30,         -30,        150,         -120,        90         };
+const int NUM_SENSORS = 5;
 const int IDX_30R = 0;
 const int IDX_30L = 1;
+const int IDX_LEFT = 3;     // merged 90L + 150L
 
 // ---------------- IR FILTERING ----------------
 const unsigned long IR_HOLD_MS = 40;    // a sensor "sees" for this long after its last LOW
@@ -186,7 +194,9 @@ unsigned long previousGyroTime = 0;
 void updateIR() {
   unsigned long now = millis();
   for (int i = 0; i < NUM_SENSORS; i++) {
-    if (digitalRead(SENSOR_PINS[i]) == LOW) {
+    bool low = digitalRead(SENSOR_PINS[i]) == LOW;
+    if (i == IDX_LEFT && digitalRead(PIN_IR_90L) == LOW) low = true;
+    if (low) {
       lastSeen[i] = now;
       lastSeenAngle[i] = angleZ;
     }
@@ -448,6 +458,7 @@ void setup() {
     lastSeen[i] = 0;
     lastSeenAngle[i] = 0;
   }
+  pinMode(PIN_IR_90L, INPUT_PULLUP);   // not in SENSOR_PINS: merged into IDX_LEFT
   stopMotor();
   digitalWrite(PIN_LASER, LOW);
 
