@@ -1,27 +1,58 @@
 // ============================================================================
-//  v3_test.ino: demo sketch, simplified (2026-11-06). No Serial.
+//  v3_test.ino: seth_test.ino with demo-day fixes, no Serial (2026-11-06)
 // ============================================================================
-//  What it does, in order:
-//   1. SEEK: turn toward the most-forward IR sensor that sees a beacon, at a
-//      steady TRACK_RATE deg/s (gyro speed control).
-//   2. LOCK: 30R and 30L both see it at once, or both saw it within
-//      SPLIT_WINDOW_MS (split lock).
-//   3. BRAKE (PWM 0 = driver brake), settle, pick the aim heading:
-//        split lock          -> halfway between where 30R and 30L last saw it
-//        still overlapping   -> where it stopped
-//        slid out of overlap -> where the lock began
-//      then add AIM_OFFSET_DEG.
-//   4. RELOCATE to that heading (gyro hold) until on target and still.
-//   5. FIRE the laser for 2 s while holding the heading.
-//   6. DONE: motor off unless pushed more than IDLE_DEADBAND off. Goes again
-//      when all sensors are dark for 0.5 s, a side/back sensor sees a beacon,
-//      or the beacon is seen but not locked for 1.5 s.
+//  Same pins, same idea (gyro heading lock + hold) as seth_test.ino. Changes:
+//   1. Hold where it actually stopped. After braking, if both front sensors
+//      still see the beacon, THAT heading becomes the target. The old code
+//      saved the heading at the very edge of the lock zone and drove back to it.
+//   2. Relocate timeout no longer skips the beacon. It fires anyway.
+//   3. Rate (D) term in corrections. No push while already swinging toward
+//      the target, and "reached" needs the robot to be nearly still.
+//   4. No Serial output at all (it runs untethered; the old 9600 per-loop
+//      prints were stalling the control loop to about 20 Hz).
+//   5. Brake ends early once the gyro says rotation has stopped, so the
+//      reverse pulse can't push it backwards at low speed.
+//   6. Tracking no longer runs blind for 150 ms. It stops the drive step the
+//      moment both front sensors see the beacon.
+//   7. IR latch (IR_HOLD_MS) so one missed 38 kHz frame doesn't re-arm a lock,
+//      and a lock only re-arms after the overlap is gone for REARM_MS.
+//   8. I2C timeout so motor noise can't freeze the bus forever, and if the
+//      MPU isn't found the robot falls back to IR-only (v1-style) instead of
+//      hanging in setup().
 //
-//  Startup blinks: 1 = gyro calibrated and ready (keep it STILL until then),
-//  3 = MPU not found (runs IR-only, no heading hold).
+//  10. Demo tuning (fixed beacons, each left on a while): waits until it is
+//      on target AND still for STABLE_MS before firing, keeps holding the
+//      heading after the 2 s, and only re-arms when all sensors go dark
+//      (beacon off) or a side/back sensor sees a new beacon.
 //
-//  The MPU stands upright, so yaw is measured about the gravity "up" axis
-//  found at startup. + yaw = counter-clockwise seen from above.
+//  11. Slow + smooth (after 2nd hang test: too fast, jittery): gyro speed
+//      control holds TRACK_RATE deg/s instead of a fixed PWM,
+//      full stop before reversing, no reverse-plug brake, softer and fewer
+//      hold nudges. Tune: TRACK_RATE for speed, SPEED_KI if it
+//      surges (lower) or stalls (higher).
+//
+//  12. Wait until still before firing (STILL_*), and USE_HEADING_CORRECTION
+//      switch: false = gyro never steers, only governs speed + waits.
+//
+//  13. After 3rd hang test (stalled, laser never fired again): START_PWM 180 /
+//      MIN_PWM 130 so it doesn't stall, and re-arm if the beacon is still seen
+//      but not locked for LOST_REARM_MS (moved beacon / new beacon in front).
+//
+//  14. MPU stands upright in the breadboard: yaw is measured about the
+//      gravity "up" axis found at startup (any fixed mounting works).
+//      Keep it still until the 1 blink. CORRECTION_INVERT = true.
+//
+//  15. Continuous hold (HOLD_*): steady push proportional to error instead of
+//      taps, so it actually stops on target and resists cord-twist drift.
+//
+//   9. Split lock (2026-11-06, after first hang test): fires even when the
+//      two front sensors never see the beacon at the same time. See SPLIT LOCK.
+//
+//  Startup laser blinks: 1 = gyro calibrated and ready, 3 = MPU not found
+//  (running IR-only). Keep it still until the blink.
+//
+//  Tuning on the rig, in this order: CORRECTION_INVERT (sign), KD, then
+//  CORRECTION_PULSE / CORRECTION_PWM, then ANGLE_TOLERANCE.
 // ============================================================================
 
 #include <Adafruit_MPU6050.h>
@@ -30,23 +61,15 @@
 
 Adafruit_MPU6050 mpu;
 
-// ============================================================================
-//  TUNE THESE (one per test run)
-// ============================================================================
-const float AIM_OFFSET_DEG = 0.0;  // laser always lands one side: + aims right, - aims left (deg)
-const float HOLD_TOL       = 2.0;  // deg: "on target". Smaller = more accurate, but may buzz
-const int   HOLD_MIN_PWM   = 165;  // smallest push near target. Stops short: raise. Overshoots: lower
-const float TRACK_RATE     = 12.0; // deg/s seeking speed. Sways: lower. Too slow: raise
-const float IDLE_DEADBAND  = 5.0;  // deg: between beacons, only push back if turned more than this
-const bool  CORRECTION_INVERT = true; // flip ONLY if the hold drives away from the target
-
-// ============================================================================
-//  FIXED (leave these alone)
-// ============================================================================
-// Pins
+// ---------------- MOTOR DRIVER ----------------
 const int PIN_DIR = 8;
 const int PIN_PWM = 9;
+
+// ---------------- LASER ----------------
 const int PIN_LASER = 6;
+
+// ---------------- IR SENSORS (active LOW) ----------------
+// Positive = right, negative = left
 const int PIN_IR_30R  = 3;
 const int PIN_IR_90R  = 10;
 const int PIN_IR_150R = 12;
@@ -54,46 +77,83 @@ const int PIN_IR_150L = 7;
 const int PIN_IR_90L  = 11;
 const int PIN_IR_30L  = 5;
 
-// Sensor list (angle: + = right, - = left)
 const int SENSOR_PINS[]   = { PIN_IR_30R, PIN_IR_30L, PIN_IR_150R, PIN_IR_150L, PIN_IR_90L, PIN_IR_90R };
 const int SENSOR_ANGLES[] = { 30,         -30,        150,         -150,        -90,        90         };
 const int NUM_SENSORS = 6;
 const int IDX_30R = 0;
 const int IDX_30L = 1;
 
-// IR timing
-const unsigned long IR_HOLD_MS      = 40;   // a sensor "sees" for this long after its last LOW
-const unsigned long SPLIT_WINDOW_MS = 600;  // split lock: both fronts seen within this
-const float         SPLIT_MAX_DEG   = 70.0; // ...and their sightings this close together
-const unsigned long REARM_MS        = 500;  // all dark this long = beacon switched off
-const unsigned long LOST_REARM_MS   = 1500; // seen but not locked this long = go again
+// ---------------- IR FILTERING ----------------
+const unsigned long IR_HOLD_MS = 40;    // a sensor "sees" for this long after its last LOW
+const unsigned long REARM_MS   = 500;   // all sensors dark this long = beacon switched off
+const unsigned long LOST_REARM_MS = 1500; // after firing: beacon seen but not locked this long = it moved, go again
 
-// Seeking (gyro speed control)
-const int   START_PWM = 180;
-const int   MIN_PWM   = 130;
-const int   MAX_PWM   = 230;
-const float SPEED_KI  = 0.03;              // PWM per (deg/s error) per ms
-const int   NO_GYRO_PWM = 180;             // fixed PWM if no MPU
-const unsigned long TRACK_STEP_MS    = 150;
-const unsigned long REVERSE_PAUSE_MS = 250; // full stop before reversing
+// ---------------- SPLIT LOCK ----------------
+// With the shrouds moved inside, +30 and -30 may never see the beacon at the
+// same time (robot zig-zags and never fires). Split lock: if BOTH front
+// sensors have seen the beacon within SPLIT_WINDOW_MS, aim at the gyro
+// midpoint between the headings where each last saw it.
+const unsigned long SPLIT_WINDOW_MS = 600;
+const float SPLIT_MAX_DEG = 70.0;        // ignore if the two sightings are further apart
 
-// Brake / hold
-const unsigned long BRAKE_MS = 80;         // PWM 0 (driver brake) after lock
-const float HOLD_KP      = 8.0;            // PWM per deg of error
-const float HOLD_KD      = 2.0;            // PWM per deg/s (eases off when moving toward target)
+// ---------------- MOTOR SPEED (gyro speed control) ----------------
+// Instead of a fixed PWM, the gyro holds a slow, steady rotation speed. PWM
+// creeps up until the robot moves at the target speed, then backs off, so it
+// overcomes stiction without lurching and accelerates gently (less sway).
+const float TRACK_RATE    = 12.0;  // deg/s, one slow speed everywhere (less momentum to kill)
+const int   START_PWM     = 180;   // PWM to start from (v1 found ~180 = slowest that beats stiction)
+const int   MIN_PWM       = 130;   // never drop below this while driving, or it stalls
+const int   MAX_PWM       = 230;
+const float SPEED_KI      = 0.03;  // PWM per (deg/s of error) per ms. Higher = reacts faster
+const int   NO_GYRO_PWM   = 180;   // fixed PWM if the MPU isn't found
+const unsigned long TRACK_STEP_MS = 150; // max length of one drive step (exits early on lock)
+const unsigned long REVERSE_PAUSE_MS = 250; // full stop before reversing direction
+
+// ---------------- BRAKE ----------------
+const unsigned long OVERSHOOT_MS = 0;    // keep driving after lock (0 now that it arrives slowly)
+const bool USE_REVERSE_BRAKE = false;    // slow approach: driver brake alone is enough, gentler
+const unsigned long BRAKE_GAP_MS = 30;
+const unsigned long BRAKE_MAX_MS = 50;   // reverse pulse, ends early when rotation stops
+const float BRAKE_STOP_RATE = 15.0;      // deg/s: below this the reverse pulse ends
+
+// ---------------- GYRO CORRECTION ----------------
+const float ANGLE_TOLERANCE = 3.5;       // deg
+const float HOLD_DEADBAND   = 6.0;       // deg: after firing, only correct beyond this
+const float SETTLED_RATE    = 8.0;       // deg/s: "still enough" to call it reached
+const float KD              = 0.15;      // s: predicted error = error - KD * rate
+const int CORRECTION_PWM = 190;          // softer nudges = less jitter
+const unsigned long CORRECTION_PULSE = 25;
+const unsigned long CORRECTION_COAST = 150; // let each nudge finish before judging again
+const unsigned long MAX_RELOCATE_TIME = 3000;  // beacons stay on a while: take time to settle
+const unsigned long STABLE_MS = 250;           // must stay on target + still this long before firing
+
+const bool CORRECTION_INVERT = true;     // flip if the hold drives AWAY from target
+
+// ---------------- CONTINUOUS HOLD ----------------
+// Instead of short taps, push continuously with PWM that grows with the error
+// and backs off as it moves toward the target. This beats stiction and the
+// twist of the hanging cord, which the taps couldn't.
+const bool  HOLD_CONTINUOUS = true;   // false = old tap-style corrections
+const float HOLD_KP      = 8.0;       // PWM per degree of error
+const float HOLD_KD      = 2.0;       // PWM per deg/s (damping: eases off when moving toward target)
+const int   HOLD_MIN_PWM = 150;       // smallest push (just under stiction; error adds on top)
 const int   HOLD_MAX_PWM = 220;
-const float HOLD_U_START = 6.0;            // ignore tiny pushes (gyro noise)
-const float SETTLED_RATE = 8.0;            // deg/s: slow enough to count as on target
-const float STUCK_RATE   = 2.0;            // pushing but slower than this = stuck
-const float STUCK_BOOST_PER_MS = 0.1;      // extra PWM per ms while stuck
-const unsigned long STABLE_MS = 250;       // on target + still this long, then fire
-const unsigned long MAX_RELOCATE_TIME = 5000;
+const float HOLD_TOL     = 2.0;       // deg: inside this, motor off
 
-// Fallback wait (only if relocate times out, or no MPU)
-const float STILL_RATE = 5.0;
-const unsigned long STILL_MS     = 400;
-const unsigned long STILL_MAX_MS = 3000;
+// ---------------- WAIT UNTIL STILL (before firing) ----------------
+// Uses only HOW FAST it's turning (no direction), so it can't go wrong if the
+// gyro sign is backwards. Fires once rotation stays below STILL_RATE for
+// STILL_MS, or after STILL_MAX_MS regardless.
+const float STILL_RATE = 5.0;                 // deg/s: below this counts as still
+const unsigned long STILL_MS     = 400;       // must stay still this long
+const unsigned long STILL_MAX_MS = 3000;      // give up waiting and fire anyway
 
+// Heading correction (relocate + nudges while firing + hold after).
+// false = option 2: gyro only governs speed and waits for still; never steers
+// to a heading, so CORRECTION_INVERT can't matter.
+const bool USE_HEADING_CORRECTION = true;
+
+// ---------------- LASER ----------------
 const unsigned long LASER_TIME = 2000;
 
 // ---------------- STATE ----------------
@@ -101,6 +161,7 @@ bool gyroOk = false;
 bool wasSpinning = false;
 float trackPwm = 0;
 int trackDir = -1;            // -1 = not driving
+int currentDir = LOW;
 
 bool targetHandled = false;
 float targetAngle = 0;
@@ -108,15 +169,15 @@ float targetAngle = 0;
 unsigned long lastSeen[NUM_SENSORS];
 float lastSeenAngle[NUM_SENSORS];        // gyro heading when each sensor last saw the beacon
 
+// The MPU stands UPRIGHT in the breadboard, so its Z axis is horizontal and
+// can't see the robot turning. Instead: at startup, measure gravity to find
+// which board axis points "up", then read rotation about that axis using all
+// three gyro axes. Works for any FIXED mounting, no sign setting needed.
 float biasX = 0, biasY = 0, biasZ = 0;
 float upX = 0, upY = 0, upZ = 1;
 float gyroZRate = 0;
 float angleZ = 0;
 unsigned long previousGyroTime = 0;
-
-bool  idleActive = false;      // false = take a new idle heading next time
-bool  idleCorrecting = false;
-float idleTarget = 0;
 
 // =====================================================
 // IR
@@ -136,12 +197,12 @@ bool sees(int i) {
   return (lastSeen[i] != 0) && (millis() - lastSeen[i] <= IR_HOLD_MS);
 }
 
-bool recent(int i, unsigned long window) {
-  return (lastSeen[i] != 0) && (millis() - lastSeen[i] <= window);
-}
-
 bool overlapNow() {
   return sees(IDX_30R) && sees(IDX_30L);
+}
+
+bool recent(int i, unsigned long window) {
+  return (lastSeen[i] != 0) && (millis() - lastSeen[i] <= window);
 }
 
 // Both front sensors saw the beacon recently (not necessarily together)
@@ -174,7 +235,9 @@ void updateGyro() {
   float gy = g.gyro.y * 180.0 / PI - biasY;
   float gz = g.gyro.z * 180.0 / PI - biasZ;
   gyroZRate = gx * upX + gy * upY + gz * upZ;
-  if (fabs(gyroZRate) < 0.3) gyroZRate = 0;
+  if (fabs(gyroZRate) < 0.3) {
+    gyroZRate = 0;
+  }
 
   angleZ += gyroZRate * dt;
 }
@@ -199,53 +262,112 @@ void stopMotor() {
 
 void drive(int dir, int pwm) {
   digitalWrite(PIN_DIR, dir);
+  currentDir = dir;
   analogWrite(PIN_PWM, pwm);
 }
 
-// One hold step toward targetAngle. Returns true when on target and still.
-// Only ever pushes TOWARD the target; if it's already swinging in, it brakes.
+// Reverse pulse that ends as soon as the gyro says rotation has stopped.
+void brakeFromSpin(bool overshoot) {
+  if (overshoot) gyroDelay(OVERSHOOT_MS);
+  stopMotor();
+  gyroDelay(BRAKE_GAP_MS);
+
+  if (!USE_REVERSE_BRAKE) {
+    // Driver brake (PWM 0) and let it settle
+    gyroDelay(BRAKE_MAX_MS);
+    return;
+  }
+
+  if (!gyroOk) {
+    // No gyro: old fixed brake
+    drive(!currentDir, 255);
+    gyroDelay(BRAKE_MAX_MS);
+    stopMotor();
+    return;
+  }
+
+  float startRate = gyroZRate;
+  int brakeDir = !currentDir;
+  drive(brakeDir, 255);
+
+  unsigned long start = millis();
+  while (millis() - start < BRAKE_MAX_MS) {
+    updateGyro();
+    updateIR();
+    // Stopped, or rate has changed sign (we'd start going backwards)
+    if (fabs(gyroZRate) < BRAKE_STOP_RATE || (gyroZRate * startRate) < 0) {
+      break;
+    }
+    delay(2);
+  }
+  stopMotor();
+}
+
+// One correction step towards targetAngle. Returns true when on target and still.
 bool correctStep() {
   updateGyro();
-  updateIR();
   float error = targetAngle - angleZ;
 
-  if (fabs(error) <= HOLD_TOL && fabs(gyroZRate) <= SETTLED_RATE) {
-    stopMotor();
-    delay(2);
-    return true;
-  }
-  float u = HOLD_KP * error - HOLD_KD * gyroZRate;   // + means push toward + angle
-  bool pushAway = (u > 0) != (error > 0);
-  if (fabs(error) <= HOLD_TOL || pushAway || fabs(u) < HOLD_U_START) {
-    stopMotor();
+  if (HOLD_CONTINUOUS) {
+    updateIR();
+    if (fabs(error) <= HOLD_TOL && fabs(gyroZRate) <= SETTLED_RATE) {
+      stopMotor();
+      delay(2);
+      return true;
+    }
+    float u = HOLD_KP * error - HOLD_KD * gyroZRate;   // + means push toward + angle
+    if (fabs(error) <= HOLD_TOL || fabs(u) < 1.0) {
+      stopMotor();              // close enough, or damping says let it coast in
+      delay(2);
+      return false;
+    }
+    int pwm = HOLD_MIN_PWM + (int)fabs(u);
+    if (pwm > HOLD_MAX_PWM) pwm = HOLD_MAX_PWM;
+    bool direction = (u > 0) ? HIGH : LOW;
+    if (CORRECTION_INVERT) direction = !direction;
+    drive(direction, pwm);
     delay(2);
     return false;
   }
-  // Stiction: if pushing but barely moving, keep adding PWM until it moves
-  static float stuckBoost = 0;
-  static unsigned long lastPush = 0;
-  unsigned long nowMs = millis();
-  if (fabs(gyroZRate) < STUCK_RATE && lastPush != 0 && nowMs - lastPush < 50) {
-    stuckBoost += STUCK_BOOST_PER_MS * (nowMs - lastPush);
-  } else {
-    stuckBoost = 0;
+
+  float predicted = error - KD * gyroZRate;   // where we'll be shortly if we do nothing
+
+  if (fabs(error) <= ANGLE_TOLERANCE && fabs(gyroZRate) <= SETTLED_RATE) {
+    stopMotor();
+    return true;
   }
-  lastPush = nowMs;
-  int pwm = HOLD_MIN_PWM + (int)fabs(u) + (int)stuckBoost;
-  if (pwm > HOLD_MAX_PWM) pwm = HOLD_MAX_PWM;
-  bool direction = (u > 0) ? HIGH : LOW;
-  if (CORRECTION_INVERT) direction = !direction;
-  drive(direction, pwm);
-  delay(2);
+
+  if (fabs(predicted) <= ANGLE_TOLERANCE) {
+    // Already drifting into the window: don't push, let it arrive
+    stopMotor();
+    gyroDelay(10);
+    return false;
+  }
+
+  bool direction = (predicted > 0) ? HIGH : LOW;
+  if (CORRECTION_INVERT) {
+    direction = !direction;
+  }
+
+  drive(direction, CORRECTION_PWM);
+  gyroDelay(CORRECTION_PULSE);
+  stopMotor();
+  gyroDelay(CORRECTION_COAST);
   return false;
 }
 
-// Turn to targetAngle; done once on target and still for STABLE_MS.
+// =====================================================
+// RETURN TO SAVED TARGET
+// =====================================================
+
 bool relocateToTarget() {
   unsigned long startTime = millis();
+
   unsigned long stableSince = 0;
+
   while (millis() - startTime < MAX_RELOCATE_TIME) {
     if (correctStep()) {
+      // On target and still: wait until it STAYS that way (sway has died down)
       if (stableSince == 0) stableSince = millis();
       if (millis() - stableSince >= STABLE_MS) return true;
       gyroDelay(5);
@@ -253,15 +375,20 @@ bool relocateToTarget() {
       stableSince = 0;
     }
   }
+
   stopMotor();
   return false;
 }
 
-// Motor off, wait for the sway to die down (fallback only).
+// =====================================================
+// LASER FIRE + HOLD
+// =====================================================
+
+// Option 4: motor off, wait for the twist/sway to die down before firing.
 void waitUntilStill() {
   stopMotor();
   if (!gyroOk) {
-    gyroDelay(500);
+    gyroDelay(500);                 // no gyro: just a fixed settle
     return;
   }
   unsigned long start = millis();
@@ -279,33 +406,20 @@ void waitUntilStill() {
   }
 }
 
-// Between beacons: keep the motor off unless turned more than IDLE_DEADBAND.
-void idleHold() {
-  if (!gyroOk) { stopMotor(); return; }
-  if (!idleActive) {
-    idleActive = true;
-    idleCorrecting = false;
-    idleTarget = angleZ;
-  }
-  if (!idleCorrecting && fabs(idleTarget - angleZ) > IDLE_DEADBAND) idleCorrecting = true;
-  if (!idleCorrecting) { stopMotor(); return; }
-  float saved = targetAngle;
-  targetAngle = idleTarget;
-  if (correctStep()) idleCorrecting = false;   // back within HOLD_TOL and still
-  targetAngle = saved;
-}
-
 void fireLaserAndHold() {
   digitalWrite(PIN_LASER, HIGH);
+
   unsigned long fireStart = millis();
   while (millis() - fireStart < LASER_TIME) {
-    if (gyroOk) {
+    if (gyroOk && USE_HEADING_CORRECTION) {
       correctStep();
     } else {
       updateIR();
       delay(2);
     }
+
   }
+
   digitalWrite(PIN_LASER, LOW);
   stopMotor();
 }
@@ -325,6 +439,7 @@ void blinkLaser(int times) {
 // =====================================================
 
 void setup() {
+
   pinMode(PIN_DIR, OUTPUT);
   pinMode(PIN_PWM, OUTPUT);
   pinMode(PIN_LASER, OUTPUT);
@@ -391,16 +506,22 @@ void loop() {
 
   bool overlap = lockNow();
 
-  // ---------- RE-ARM after firing ----------
-  // Go again when: all sensors dark for REARM_MS, a side/back sensor sees a
-  // beacon, or the beacon is seen but not locked for LOST_REARM_MS.
+  // Re-arm for the next beacon when either:
+  //  - every sensor has been dark for REARM_MS (current beacon switched off), or
+  //  - a side/back sensor sees a beacon (a different beacon has come on).
+  // Beacons stay on a while in the demo, so this stops it re-firing at the
+  // same beacon or wandering off it after the 2 s.
   if (targetHandled) {
     bool anyRecent = false;
-    bool sideOrBack = false;
     for (int i = 0; i < NUM_SENSORS; i++) {
       if (recent(i, REARM_MS)) anyRecent = true;
+    }
+    bool sideOrBack = false;
+    for (int i = 0; i < NUM_SENSORS; i++) {
       if (i != IDX_30R && i != IDX_30L && sees(i)) sideOrBack = true;
     }
+    // Beacon still visible to a front sensor but no longer locked (it was moved
+    // or a new beacon is in front): after LOST_REARM_MS, go for it again.
     static unsigned long notLockedSince = 0;
     if (lockNow()) {
       notLockedSince = 0;
@@ -417,49 +538,53 @@ void loop() {
   // ---------- NEW LOCK ----------
   if (overlap && !targetHandled) {
     targetHandled = true;
-    idleActive = false;
     float entryAngle = angleZ;
     bool trueOverlap = overlapNow();
     float splitMid = (lastSeenAngle[IDX_30R] + lastSeenAngle[IDX_30L]) / 2.0;
 
     if (wasSpinning) {
-      stopMotor();               // PWM 0 = driver brake
-      gyroDelay(BRAKE_MS);
+      brakeFromSpin(trueOverlap);  // no overshoot push for a split lock
       wasSpinning = false;
     }
     trackDir = -1;
 
-    if (!gyroOk) {
+    if (!gyroOk || !USE_HEADING_CORRECTION) {
       waitUntilStill();
       fireLaserAndHold();
       return;
     }
 
-    // Let it settle a moment, then decide what to aim at
+    // Let it settle a moment, then decide what to hold
     gyroDelay(100);
     if (!trueOverlap) {
-      targetAngle = splitMid;      // aim between where 30R and 30L saw it
+      targetAngle = splitMid;      // aim between where +30 and -30 saw it
     } else if (overlapNow()) {
       targetAngle = angleZ;        // still locked where it stopped: hold here
     } else {
       targetAngle = entryAngle;    // slid out of the zone: go back to where lock began
     }
-    targetAngle -= AIM_OFFSET_DEG; // + yaw is CCW (left), so right = minus
 
-    if (!relocateToTarget()) waitUntilStill();
+
+    relocateToTarget();            // fires whether or not this times out
+    waitUntilStill();
     fireLaserAndHold();
     return;
   }
 
   // ---------- ALREADY FIRED, BEACON STILL ON ----------
+  // Stay pointed at it (gyro hold) instead of chasing front-sensor flicker.
   if (targetHandled) {
     digitalWrite(PIN_LASER, LOW);
     trackDir = -1;
-    idleHold();
+    if (gyroOk && USE_HEADING_CORRECTION && fabs(targetAngle - angleZ) > HOLD_DEADBAND) {
+      correctStep();               // only fix big drift, otherwise leave it alone
+    } else {
+      stopMotor();
+    }
     return;
   }
 
-  // ---------- SEEK ----------
+  // ---------- TRACKING ----------
   bool found = false;
   int bestAngle = 0;
   int bestAbs = 9999;
@@ -477,9 +602,10 @@ void loop() {
   if (found) {
     digitalWrite(PIN_LASER, LOW);
     int dir = bestAngle > 0 ? HIGH : LOW;
+    float targetRate = TRACK_RATE;
 
     if (dir != trackDir) {
-      // Reversing: stop fully first, then restart gently
+      // Reversing (zig-zag across the beacon): stop fully first, then restart gently
       if (trackDir != -1) {
         stopMotor();
         gyroDelay(REVERSE_PAUSE_MS);
@@ -488,9 +614,8 @@ void loop() {
       trackPwm = START_PWM;
     }
     wasSpinning = true;
-    idleActive = false;
 
-    // Drive step with gyro speed control; stop the moment we lock
+    // Drive step with gyro speed control; stop waiting the moment we lock
     unsigned long stepStart = millis();
     unsigned long last = stepStart;
     while (millis() - stepStart < TRACK_STEP_MS) {
@@ -498,7 +623,7 @@ void loop() {
       updateIR();
       unsigned long t = millis();
       if (gyroOk) {
-        trackPwm += SPEED_KI * (TRACK_RATE - fabs(gyroZRate)) * (t - last);
+        trackPwm += SPEED_KI * (targetRate - fabs(gyroZRate)) * (t - last);
         if (trackPwm < MIN_PWM) trackPwm = MIN_PWM;
         if (trackPwm > MAX_PWM) trackPwm = MAX_PWM;
       } else {
@@ -509,11 +634,12 @@ void loop() {
       if (lockNow() && !targetHandled) break;
       delay(2);
     }
+
     return;
   }
 
   // ---------- NOTHING SEEN ----------
-  idleHold();
+  stopMotor();
   digitalWrite(PIN_LASER, LOW);
   wasSpinning = false;
   trackDir = -1;
