@@ -1,8 +1,9 @@
 // ============================================================================
 //  simplified_v3.ino: tracking-only version of v3_test (2026-11-06)
 // ============================================================================
-//  No lock, relocate, wait-until-still or damping. The satellite tracks with
-//  the same code as v3_test and fires the laser while it tracks:
+//  No relocate or wait-until-still. The satellite tracks with the same code
+//  as v3_test, holds still once it's on the beacon, and fires the laser
+//  alongside either (firing never steers):
 //   1. TRACKING:  turn toward the sensor closest to the front.
 //   2. COUNTDOWN: a front sensor (+30 or -30) has read the beacon. Keep
 //      tracking, and fire as soon as it looks centred, or FIRE_DELAY_MS after
@@ -10,20 +11,37 @@
 //      have read it since the countdown began (it's between them), or nothing
 //      has seen it for GAP_CONFIRM_MS just after a front reading (it slipped
 //      into the blind gap straight ahead, where tracking stops).
-//   3. FIRING:    laser on for LASER_TIME while tracking carries on.
-//  Then straight back to TRACKING (re-armed), so it fires again a bit after
-//  the next front reading. Only one beacon is on at a time, so firing at the
-//  same one again is harmless.
+//   3. FIRING:    laser on for LASER_TIME while tracking/holding carries on.
+//   4. COOLDOWN:  laser off for COOLDOWN_MS while tracking/holding carries on.
+//  Then back to TRACKING (re-armed), so it fires again a bit after the next
+//  front reading. Only one beacon is on at a time, so firing at the same one
+//  again is harmless.
+//
+//  While a front sensor has the beacon, drive steps are FRONT_STEP_MS instead
+//  of TRACK_STEP_MS, so it re-checks the sensors more often and corrects
+//  before it drifts off target.
+//
+//  HOLD: when both front sensors see the beacon at once it's straight ahead,
+//  so the gyro holds that heading instead of the motor just stopping. Motor
+//  off doesn't stop a flywheel satellite on a string (leftover spin and the
+//  string's twist keep turning it), so the flywheel is left running at
+//  whatever speed cancels the drift. Tracking takes over again if the overlap
+//  is gone for HOLD_LOST_MS or it ends up HOLD_MAX_ERROR off. See HOLD.
 //
 //  Kept from v3_test: pins, 90L + 150L merged into one left sensor, IR latch,
 //  gyro speed control (MPU upright, yaw about gravity), I2C timeout, no Serial.
 //
 //  Startup laser blinks: 1 = gyro calibrated and ready, 3 = MPU not found
-//  (fixed PWM instead of speed control). Keep it still until the blink.
+//  (fixed PWM instead of speed control, and no hold). Keep it still until
+//  the blink.
 //
 //  Tune: FIRE_DELAY_MS (lower = fires sooner but may be off-centre),
 //  GAP_CONFIRM_MS (raise if it fires off-centre when a reading flickers),
-//  TRACK_RATE (speed), SPEED_KI (lower if it surges, higher if it stalls).
+//  TRACK_RATE (speed), SPEED_KI (lower if it surges, higher if it stalls),
+//  FRONT_STEP_MS (lower = corrects more often once a front sensor has it).
+//  Hold, in this order: HOLD_INVERT (flip if it gets pushed off the beacon
+//  instead of steadying), HOLD_KI (higher = steadies sooner, too high =
+//  wobbles), HOLD_RETURN (how hard it eases back onto the heading).
 // ============================================================================
 
 #include <Adafruit_MPU6050.h>
@@ -72,11 +90,29 @@ const int   MAX_PWM       = 230;
 const float SPEED_KI      = 0.03;  // PWM per (deg/s of error) per ms. Higher = reacts faster
 const int   NO_GYRO_PWM   = 180;   // fixed PWM if the MPU isn't found
 const unsigned long TRACK_STEP_MS = 150; // length of one drive step
+const unsigned long FRONT_STEP_MS = 40;  // shorter step while a front sensor has it, so it
+                                         // re-checks ~4x as often and drifts less past centre
 const unsigned long REVERSE_PAUSE_MS = 250; // full stop before reversing direction
 // Blind gaps between side/back sensors: after the beacon slips out of a side
 // sensor's view, keep turning the same way this long so the next sensor picks
 // it up. (Not in the gap straight ahead: that's where it should stop.)
 const unsigned long GAP_SWEEP_MS = 1000;
+
+// ---------------- HOLD (both front sensors see it) ----------------
+// Holds the heading where both front sensors saw the beacon: the middle of
+// all the headings where they both saw it during this hold, so it settles
+// inside the overlap, not at its edge. Same gyro speed control as tracking,
+// but signed so it can push either way: it aims for 0 deg/s plus a slow
+// drift back onto the heading, and leaves the flywheel spinning at whatever
+// speed that takes. Adapted from v3_test's ACTIVE_DAMPING.
+const float HOLD_KI      = 0.03;    // like SPEED_KI. Higher = steadies sooner, too high = wobbles
+const float HOLD_RETURN  = 1.0;     // deg/s back toward the heading per deg off (0 = only stop the turning)
+const float HOLD_U_START = 20.0;    // flywheel stays off until the push builds past this (no chatter)
+const unsigned long HOLD_KICK_MS = 40;   // START_PWM this long when the flywheel starts from stopped (stiction)
+const unsigned long HOLD_LOST_MS = 500;  // overlap gone this long = back to tracking
+const float HOLD_MAX_ERROR = 10.0;  // deg: pushed further off the heading than this = back to tracking
+const bool  HOLD_INVERT  = true;    // which way DIR turns it (CORRECTION_INVERT in v3_test). Flip if
+                                    // the hold pushes it off the beacon instead of steadying it
 
 // ---------------- FIRING ----------------
 const unsigned long FIRE_DELAY_MS  = 5000;  // fire at the latest this long after the first front reading
@@ -84,16 +120,28 @@ const unsigned long FIRE_DELAY_MS  = 5000;  // fire at the latest this long afte
 const unsigned long GAP_CONFIRM_MS = 200;   // nothing seen this long = in the gap ahead, not a flicker
 const unsigned long GAP_MS         = 600;   // ...as long as a front sensor read it this recently
 const unsigned long LOST_MS        = 1000;  // nothing seen this long = beacon gone, cancel the countdown
-const unsigned long LASER_TIME     = 2000;
+const unsigned long LASER_TIME     = 2000;  // laser on this long
+const unsigned long COOLDOWN_MS    = 2000;  // then off at least this long before it can fire again
 
 // ---------------- STATE ----------------
-enum FireState { TRACKING, COUNTDOWN, FIRING };
+enum FireState { TRACKING, COUNTDOWN, FIRING, COOLDOWN };
 FireState fireState = TRACKING;
 unsigned long stateSince = 0;
 
 bool gyroOk = false;
 float trackPwm = 0;
 int trackDir = -1;            // -1 = not driving
+
+bool holding = false;         // gyro heading hold, see HOLD
+float holdTarget = 0;         // heading being held (deg, gyro angle)
+float overlapLo = 0;          // range of headings where both front sensors saw it this hold
+float overlapHi = 0;
+unsigned long lastOverlap = 0;
+float holdU = 0;              // flywheel push, + = toward + angle. PWM = MIN_PWM + (|holdU| - HOLD_U_START)
+unsigned long holdLast = 0;
+bool holdDriving = false;     // flywheel being driven (false = motor off)
+int holdLastDir = -1;         // direction the flywheel was last driven in
+unsigned long holdKickUntil = 0;
 
 unsigned long lastSeen[NUM_SENSORS];
 
@@ -104,6 +152,8 @@ unsigned long lastSeen[NUM_SENSORS];
 float biasX = 0, biasY = 0, biasZ = 0;
 float upX = 0, upY = 0, upZ = 1;
 float gyroZRate = 0;
+float angleZ = 0;             // heading from the gyro (deg, + = counter-clockwise seen from above)
+unsigned long previousGyroTime = 0;
 
 // =====================================================
 // IR
@@ -144,20 +194,25 @@ bool readSince(int i, unsigned long t) {
 // GYRO
 // =====================================================
 
-// Rotation speed about vertical (only its size is used, for speed control).
+// Rotation speed and heading about vertical. + = counter-clockwise seen from
+// above. Tracking only uses the speed's size; the hold uses both, signed.
 void updateGyro() {
   if (!gyroOk) return;
 
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
 
+  unsigned long now = micros();
+  float dt = (now - previousGyroTime) / 1000000.0;
+  previousGyroTime = now;
+
   float gx = g.gyro.x * 180.0 / PI - biasX;
   float gy = g.gyro.y * 180.0 / PI - biasY;
   float gz = g.gyro.z * 180.0 / PI - biasZ;
   gyroZRate = gx * upX + gy * upY + gz * upZ;
-  if (fabs(gyroZRate) < 0.3) {
-    gyroZRate = 0;
-  }
+  // Small rates are no longer rounded to 0 (was: below 0.3 deg/s): the hold
+  // has to see the string's slow creep, or it would let it wander off.
+  angleZ += gyroZRate * dt;
 }
 
 // =====================================================
@@ -192,9 +247,17 @@ void updateFire() {
     return;
   }
 
-  // FIRING
-  if (now - stateSince >= LASER_TIME) {
-    digitalWrite(PIN_LASER, LOW);
+  if (fireState == FIRING) {
+    if (now - stateSince >= LASER_TIME) {
+      digitalWrite(PIN_LASER, LOW);
+      fireState = COOLDOWN;
+      stateSince = now;
+    }
+    return;
+  }
+
+  // COOLDOWN: laser off, still tracking, not allowed to fire yet
+  if (now - stateSince >= COOLDOWN_MS) {
     fireState = TRACKING;            // re-armed: fires again after the next front reading
   }
 }
@@ -231,6 +294,67 @@ void blinkLaser(int times) {
     digitalWrite(PIN_LASER, LOW);
     delay(250);
   }
+}
+
+// =====================================================
+// HOLD (both front sensors see it)
+// =====================================================
+
+// DIR that pushes toward + gyro angle (push > 0) or - angle (push < 0)
+int holdDir(float push) {
+  int dir = (push > 0) ? HIGH : LOW;
+  if (HOLD_INVERT) dir = !dir;
+  return dir;
+}
+
+void startHold() {
+  holding = true;
+  overlapLo = angleZ;
+  overlapHi = angleZ;
+  holdTarget = angleZ;
+  holdU = 0;                  // stop the flywheel first: that's what stops the turn
+  holdLast = millis();
+  holdDriving = false;
+  holdLastDir = trackDir;     // tracking may have left it spinning this way
+  stopMotor();
+}
+
+// Back to tracking. Tracking carries on from the flywheel's last direction,
+// so it still pauses before reversing it (REVERSE_PAUSE_MS).
+void endHold() {
+  holding = false;
+  trackDir = holdLastDir;
+  trackPwm = holdDriving ? MIN_PWM + (fabs(holdU) - HOLD_U_START) : START_PWM;
+  holdDriving = false;
+}
+
+// One step of the hold. The push builds up while the satellite turns faster
+// than it should (HOLD_RETURN * error, so 0 deg/s once on the heading) and
+// stays where it is once it matches, so the flywheel ends up spinning just
+// fast enough to cancel the drift. Same idea as the tracking speed control,
+// but signed so it can push either way.
+void holdStep() {
+  unsigned long t = millis();
+  float want = HOLD_RETURN * (holdTarget - angleZ);   // deg/s back toward the heading
+  if (want > TRACK_RATE) want = TRACK_RATE;
+  if (want < -TRACK_RATE) want = -TRACK_RATE;
+  holdU += HOLD_KI * (want - gyroZRate) * (t - holdLast);
+  holdLast = t;
+  float uMax = MAX_PWM - MIN_PWM + HOLD_U_START;
+  if (holdU > uMax) holdU = uMax;
+  if (holdU < -uMax) holdU = -uMax;
+
+  if (fabs(holdU) < HOLD_U_START) {
+    stopMotor();              // small push: flywheel off (no chatter)
+    holdDriving = false;
+    return;
+  }
+  if (!holdDriving) holdKickUntil = t + HOLD_KICK_MS;   // flywheel was stopped: kick it free
+  holdDriving = true;
+  int pwm = MIN_PWM + (int)(fabs(holdU) - HOLD_U_START);
+  if (t < holdKickUntil && pwm < START_PWM) pwm = START_PWM;
+  holdLastDir = holdDir(holdU);
+  drive(holdLastDir, pwm);
 }
 
 // =====================================================
@@ -291,6 +415,8 @@ void setup() {
   }
 
   blinkLaser(1);     // 1 blink = gyro calibrated, ready
+  angleZ = 0;
+  previousGyroTime = micros();
 }
 
 // =====================================================
@@ -302,10 +428,32 @@ void loop() {
   updateIR();
   updateFire();
 
-  // ---------- CENTRED ----------
-  // Both front sensors see it: it's between them, so hold still instead of
-  // chasing one of them.
-  if (sees(IDX_30R) && sees(IDX_30L)) {
+  bool overlap = sees(IDX_30R) && sees(IDX_30L);
+
+  // ---------- HOLD ----------
+  // Both front sensors see it: it's straight ahead, so hold this heading with
+  // the gyro instead of chasing one of them.
+  if (gyroOk) {
+    if (holding && fabs(holdTarget - angleZ) > HOLD_MAX_ERROR) {
+      endHold();                     // pushed too far off: give up (re-locks below if still overlapping)
+    }
+    if (overlap) {
+      if (!holding) startHold();
+      lastOverlap = millis();
+      if (angleZ < overlapLo) overlapLo = angleZ;
+      if (angleZ > overlapHi) overlapHi = angleZ;
+      holdTarget = (overlapLo + overlapHi) / 2.0;   // middle of the overlap seen so far
+    }
+    if (holding && millis() - lastOverlap > HOLD_LOST_MS) {
+      endHold();                     // beacon moved or switched off: back to tracking
+    }
+    if (holding) {
+      holdStep();
+      delay(2);
+      return;
+    }
+  } else if (overlap) {
+    // No gyro, so no hold: just stop between the two front sensors
     stopMotor();
     trackDir = -1;
     return;
@@ -350,13 +498,16 @@ void loop() {
       trackPwm = START_PWM;
     }
 
-    // Drive step with gyro speed control
+    // Drive step with gyro speed control. Shorter while a front sensor has it,
+    // so it gets back to the checks above sooner and corrects before drifting.
+    unsigned long stepLen = (sees(IDX_30R) || sees(IDX_30L)) ? FRONT_STEP_MS : TRACK_STEP_MS;
     unsigned long stepStart = millis();
     unsigned long last = stepStart;
-    while (millis() - stepStart < TRACK_STEP_MS) {
+    while (millis() - stepStart < stepLen) {
       updateGyro();
       updateIR();
       updateFire();
+      if (sees(IDX_30R) && sees(IDX_30L)) break;   // overlap: start the hold now, not after the step
       unsigned long t = millis();
       if (gyroOk) {
         trackPwm += SPEED_KI * (TRACK_RATE - fabs(gyroZRate)) * (t - last);
