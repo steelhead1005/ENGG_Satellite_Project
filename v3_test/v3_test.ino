@@ -59,6 +59,19 @@
 //      through the 2 s laser instead of on/off heading nudges. Still now
 //      means under 2 deg/s. See ACTIVE DAMPING.
 //
+//  19. FIRE_ON_LOCK: fires the moment a lock is found (about 0.2 s, for the
+//      brake and settle) instead of relocating and waiting until still first,
+//      which could take up to 6 s of corrections. With ACTIVE_DAMPING the
+//      wheel holds it steady during the 2 s instead. See LASER. Damping now
+//      kick-starts a stopped wheel at START_PWM (DAMP_KICK_MS) so it acts at
+//      once, and returns to the heading at most TRACK_RATE.
+//
+//  20. Blind gaps (turned to the beacon but never fired): tracking stopped dead
+//      whenever no sensor saw the beacon, so a beacon sitting in a gap between
+//      sensors (e.g. between +30 and -30) never got locked. It now keeps
+//      turning the same way for GAP_SWEEP_MS so the next sensor picks it up,
+//      and SPLIT_WINDOW_MS is 1000 (was 600) so wider gaps still lock.
+//
 //   9. Split lock (2026-11-06, after first hang test): fires even when the
 //      two front sensors never see the beacon at the same time. See SPLIT LOCK.
 //
@@ -112,8 +125,12 @@ const unsigned long LOST_REARM_MS = 1500; // after firing: beacon seen but not l
 // same time (robot zig-zags and never fires). Split lock: if BOTH front
 // sensors have seen the beacon within SPLIT_WINDOW_MS, aim at the gyro
 // midpoint between the headings where each last saw it.
-const unsigned long SPLIT_WINDOW_MS = 600;
+const unsigned long SPLIT_WINDOW_MS = 1000;
 const float SPLIT_MAX_DEG = 70.0;        // ignore if the two sightings are further apart
+// Blind gaps between sensors: after the beacon slips out of every sensor's
+// view, keep turning the same way this long so the next sensor picks it up
+// (between the front pair, that's what lets the split lock fire).
+const unsigned long GAP_SWEEP_MS = SPLIT_WINDOW_MS;
 
 // ---------------- MOTOR SPEED (gyro speed control) ----------------
 // Instead of a fixed PWM, the gyro holds a slow, steady rotation speed. PWM
@@ -182,6 +199,7 @@ const float DAMP_KI         = 0.05;   // PWM per (deg/s) per ms. Higher = stops 
 const float DAMP_RETURN     = 2.0;    // deg/s back toward the locked heading per deg off (0 = just stop)
 const float DAMP_U_START    = 20.0;   // wheel stays off until the push builds past this (no chatter)
 const float DAMP_ABORT_RATE = 40.0;   // deg/s: faster than this = pushing the wrong way, give up
+const unsigned long DAMP_KICK_MS = 40; // START_PWM this long when the wheel starts from stopped (stiction)
 
 // Heading correction (relocate + nudges while firing + hold after).
 // false = option 2: gyro only governs speed and waits for still; never steers
@@ -190,6 +208,10 @@ const bool USE_HEADING_CORRECTION = true;
 
 // ---------------- LASER ----------------
 const unsigned long LASER_TIME = 2000;
+// true = fire the moment a lock is found (after the brake): no relocate and no
+// wait until still first. ACTIVE_DAMPING holds it steady during the 2 s instead.
+// false = old: relocate to the locked heading, wait until still, then fire.
+const bool FIRE_ON_LOCK = true;
 
 // ---------------- STATE ----------------
 bool gyroOk = false;
@@ -200,6 +222,8 @@ int currentDir = LOW;
 float dampU = 0;              // active damping push, + = toward + angle
 unsigned long dampLast = 0;
 bool dampGaveUp = false;
+bool dampDriving = false;
+unsigned long dampKickUntil = 0;
 
 bool targetHandled = false;
 float targetAngle = 0;
@@ -430,6 +454,7 @@ void startDamping() {
   dampU = 0;
   dampLast = millis();
   dampGaveUp = false;
+  dampDriving = false;
 }
 
 // One step of the damping speed control. The push builds up while the body
@@ -447,18 +472,25 @@ void dampStep() {
     delay(2);
     return;
   }
-  float error = targetAngle - angleZ;
-  dampU += DAMP_KI * (DAMP_RETURN * error - gyroZRate) * (t - dampLast);
+  float want = DAMP_RETURN * (targetAngle - angleZ);   // deg/s back toward the heading
+  if (want > TRACK_RATE) want = TRACK_RATE;
+  if (want < -TRACK_RATE) want = -TRACK_RATE;
+  dampU += DAMP_KI * (want - gyroZRate) * (t - dampLast);
   dampLast = t;
   float uMax = MAX_PWM - MIN_PWM + DAMP_U_START;
   if (dampU > uMax) dampU = uMax;
   if (dampU < -uMax) dampU = -uMax;
   if (fabs(dampU) < DAMP_U_START) {
     stopMotor();
+    dampDriving = false;
   } else {
+    if (!dampDriving) dampKickUntil = t + DAMP_KICK_MS;   // wheel was stopped: kick it free
+    dampDriving = true;
+    int pwm = MIN_PWM + (int)(fabs(dampU) - DAMP_U_START);
+    if (t < dampKickUntil && pwm < START_PWM) pwm = START_PWM;
     bool direction = (dampU > 0) ? HIGH : LOW;   // same mapping as correctStep()
     if (CORRECTION_INVERT) direction = !direction;
-    drive(direction, MIN_PWM + (int)(fabs(dampU) - DAMP_U_START));
+    drive(direction, pwm);
   }
   delay(2);
 }
@@ -645,7 +677,7 @@ void loop() {
     trackDir = -1;
 
     if (!gyroOk || !USE_HEADING_CORRECTION) {
-      waitUntilStill();
+      if (!FIRE_ON_LOCK) waitUntilStill();
       fireLaserAndHold();
       return;
     }
@@ -661,8 +693,12 @@ void loop() {
     }
 
 
-    relocateToTarget();            // fires whether or not this times out
-    waitUntilStill();
+    if (FIRE_ON_LOCK) {
+      if (ACTIVE_DAMPING) startDamping();   // hold steady (easing onto targetAngle) while firing
+    } else {
+      relocateToTarget();          // fires whether or not this times out
+      waitUntilStill();
+    }
     fireLaserAndHold();
     return;
   }
@@ -693,6 +729,16 @@ void loop() {
         found = true;
       }
     }
+  }
+
+  // Blind gap: the beacon has just slipped between two sensors (one of them saw
+  // it a moment ago and nothing sees it now). Keep turning the same way until
+  // the next one picks it up, instead of stopping just short of it.
+  if (!found && trackDir != -1) {
+    for (int i = 0; i < NUM_SENSORS; i++) {
+      if (recent(i, GAP_SWEEP_MS)) found = true;
+    }
+    if (found) bestAngle = (trackDir == HIGH) ? 1 : -1;
   }
 
   if (found) {
